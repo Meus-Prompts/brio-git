@@ -1,0 +1,13 @@
+[package]
+name = "lazygit-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gix.workspace = true
+thiserror.workspace = true
+similar = "3"
+
+[dev-dependencies]
+tempfile.workspace = true

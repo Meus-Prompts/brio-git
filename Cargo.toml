@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = ["crates/core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+lazygit-core = { path = "crates/core" }
+lazygit-ops = { path = "crates/ops" }
+lazygit-session = { path = "crates/session" }
+gix = { version = "0.89", default-features = false, features = ["revision", "sha1", "max-performance-safe"] }
+thiserror = "2"
+anyhow = "1"
+futures = "0.3"
+portable-pty = "0.9"
+alacritty_terminal = "0.26"
+notify = "8"
+iced = { version = "0.14", features = ["canvas", "tokio", "advanced", "image"] }
+tokio = { version = "1", features = ["rt", "sync"] }
+tempfile = "3"
