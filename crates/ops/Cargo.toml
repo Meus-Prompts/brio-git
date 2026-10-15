@@ -1,0 +1,11 @@
+[package]
+name = "lazygit-ops"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
