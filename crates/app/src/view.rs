@@ -5,6 +5,7 @@ use iced::mouse::Interaction;
 use iced::widget::pane_grid::{self, PaneGrid};
 use iced::widget::{
     button, canvas, center, column, container, mouse_area, opaque, pick_list, row, scrollable, space, stack, text,
+    tooltip,
 };
 use iced::window::Direction;
 use iced::{Alignment, Color, Element, Fill, Font, Length};
@@ -12,10 +13,11 @@ use brio_core::RefKind;
 
 use crate::app::{App, Message, TabId};
 use crate::data::RepoData;
+use crate::icons;
 use crate::layout::PaneKind;
 use crate::style;
 use crate::util;
-use crate::widgets::graph::GraphView;
+use crate::widgets::graph::{GraphBase, GraphView};
 use crate::widgets::terminal::TerminalView;
 use crate::avatars::Avatars;
 use crate::workspace::{GRAPH_SCROLL, Selection, Workspace, WsMessage};
@@ -28,7 +30,7 @@ const EDGE: f32 = 5.0;
 pub fn view(app: &App) -> Element<'_, Message> {
     let mut layout = column![title_bar(app)];
     if let Some(tab) = app.tabs.get(app.active) {
-        layout = layout.push(toolbar(app, tab.id, &tab.ws));
+        layout = layout.push(toolbar(tab.id, &tab.ws));
         if let Some(b) = conflict_banner(tab.id, &tab.ws) {
             layout = layout.push(b);
         }
@@ -43,7 +45,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 .style(style::error),
         );
     }
-    layout = layout.push(body(app));
+    layout = layout.push(body(app)).push(status_bar(app));
 
     let framed: Element<_> = container(layout).style(style::root).width(Fill).height(Fill).into();
     let mut layers = stack![framed];
@@ -51,6 +53,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
         && let Some(d) = &tab.ws.dialog
     {
         layers = layers.push(view_overlay::dialog(tab.id, d));
+    }
+    if let Some(tab) = app.tabs.get(app.active)
+        && let Some(picker) = &tab.ws.branch_picker
+    {
+        layers = layers.push(view_overlay::branch_picker(tab.id, &tab.ws, picker));
     }
     if app.theme_picker {
         layers = layers.push(theme_picker());
@@ -106,7 +113,7 @@ fn title_bar(app: &App) -> Element<'_, Message> {
 
     container(
         row![
-            text("brio-git").size(15).color(style::p().accent),
+            logo(),
             tabs,
             drag,
             button(text("◐ Tema").size(13)).on_press(Message::OpenThemes).style(button::text).padding([4, 10]),
@@ -123,68 +130,162 @@ fn title_bar(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-fn toolbar<'a>(app: &'a App, id: TabId, ws: &'a Workspace) -> Element<'a, Message> {
+/// The app mark: gradient badge with the graph icon, then "brio" and a quieter "git".
+fn logo<'a>() -> Element<'a, Message> {
+    let p = style::p();
+    let badge = container(icons::icon(icons::GIT_GRAPH, 13.0).color(Color::WHITE))
+        .width(22)
+        .height(22)
+        .center_x(22)
+        .center_y(22)
+        .style(style::logo);
+    let semibold = Font { weight: iced::font::Weight::Semibold, ..Font::default() };
+    row![badge, row![text("brio").size(15).font(semibold).color(p.text), text("git").size(15).color(p.muted)]]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
+}
+
+fn toolbar<'a>(id: TabId, ws: &'a Workspace) -> Element<'a, Message> {
+    let p = style::p();
     let branch = ws.repo.as_ref().map(|r| match (&r.head.branch, &r.head.id) {
-        (Some(b), _) => format!("⎇ {b}"),
+        (Some(b), _) => b.clone(),
         (None, Some(id)) => format!("HEAD destacado em {}", &id[..8.min(id.len())]),
         (None, None) => "repositório vazio".into(),
     });
+    let chip = button(
+        row![
+            icons::icon(icons::GIT_BRANCH, 13.0),
+            text(branch.unwrap_or_default()).size(13),
+            icons::icon(icons::CHEVRON_DOWN, 12.0),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+    )
+    .on_press_maybe(ws.repo.as_ref().map(|_| Message::Tab(id, WsMessage::OpenBranchPicker)))
+    .padding([3, 9])
+    .style(style::chip_button);
 
-    let mut toggles = row![text("Painéis").size(12).color(style::p().muted)].spacing(4).align_y(Alignment::Center);
-    for kind in PaneKind::ALL {
-        let visible = app.layout.is_visible(kind);
-        toggles = toggles.push(
-            button(text(kind.title()).size(12))
-                .on_press(Message::TogglePane(kind))
-                .style(if visible { button::secondary } else { button::text })
-                .padding([3, 8]),
-        );
-    }
-
-    let p = style::p();
     let up = ws.repo.as_ref().and_then(|r| r.upstream.as_ref());
     let current = ws.repo.as_ref().and_then(|r| r.current_branch().map(str::to_owned));
     let has_changes = ws.repo.as_ref().is_some_and(|r| !r.changes.is_empty());
     let has_stash = ws.repo.as_ref().is_some_and(|r| !r.stashes.is_empty());
     let idle = ws.busy.is_none();
-    let tool = |label: String, op: Option<Op>| {
-        button(text(label).size(12))
+    let tool = |glyph: char, label: &'static str, count: usize, op: Option<Op>, help: String| {
+        let mut content = row![icons::icon(glyph, 14.0), text(label).size(12)].spacing(6).align_y(Alignment::Center);
+        if count > 0 {
+            content = content.push(container(text(count.to_string()).size(10)).padding([0, 6]).style(style::pill(p.accent)));
+        }
+        let b = button(content)
             .on_press_maybe(op.filter(|_| idle).map(|op| Message::Tab(id, WsMessage::Request(op))))
-            .style(button::secondary)
-            .padding([3, 10])
+            .style(style::ghost)
+            .padding([4, 9]);
+        tip(b, help, tooltip::Position::Bottom)
     };
-    let pull = format!("↓ Pull{}", up.filter(|u| u.behind > 0).map(|u| format!(" {}", u.behind)).unwrap_or_default());
-    let push = format!("↑ Push{}", up.filter(|u| u.ahead > 0).map(|u| format!(" {}", u.ahead)).unwrap_or_default());
-    let net = row![
-        tool("⟳ Fetch".into(), Some(Op::Fetch)),
-        tool(pull, up.map(|_| Op::Pull)),
-        tool(push, current.clone().map(|branch| Op::Push { branch, force: false })),
-        tool("Stash".into(), has_changes.then_some(Op::StashPush)),
-        tool("Pop".into(), has_stash.then(|| Op::StashPop("stash@{0}".into()))),
-    ]
-    .spacing(4);
+    let branch_name = current.clone().unwrap_or_else(|| "HEAD".into());
+    let commits = |n: usize| if n == 1 { "1 commit".to_owned() } else { format!("{n} commits") };
+    let pull_help = match up {
+        Some(u) if u.behind > 0 => format!("Pull: traz {} de {} para {branch_name}.", commits(u.behind), u.name),
+        Some(u) => format!("Pull: traz as novidades de {} para {branch_name}.", u.name),
+        None => "Pull: indisponível, a branch atual não acompanha nenhuma branch remota.".into(),
+    };
+    let push_help = match up {
+        Some(u) if u.ahead > 0 => format!("Push: envia {} de {branch_name} para {}.", commits(u.ahead), u.name),
+        Some(u) => format!("Push: envia {branch_name} para {}.", u.name),
+        None => format!("Push: envia {branch_name} para o remoto."),
+    };
+    let stash_help = if has_changes {
+        "Stash: guarda todas as alterações (inclusive arquivos novos) e limpa o working tree."
+    } else {
+        "Stash: não há alterações para guardar."
+    };
+    let pop_help = if has_stash {
+        "Pop: reaplica o stash mais recente e o remove da lista."
+    } else {
+        "Pop: não há stash guardado."
+    };
+    let divider = || container(space()).width(1).height(16).style(style::divider);
 
-    let status: Element<_> = match (&ws.busy, ws.loading) {
-        (Some(b), _) => text(format!("⏳ {b}")).size(12).color(p.warn).into(),
-        (None, true) => text("atualizando…").size(12).color(p.muted).into(),
-        (None, false) => text(up.map(|u| format!("↔ {}", u.name)).unwrap_or_default()).size(12).color(p.muted).into(),
-    };
+    let refresh = button(icons::icon(icons::REFRESH, 13.0))
+        .on_press(Message::Tab(id, WsMessage::Refresh))
+        .style(style::ghost)
+        .padding([5, 7]);
+    let refresh = tip(
+        refresh,
+        "Recarregar: relê branches, commits e status do disco. Já acontece sozinho quando os arquivos mudam; use se algo parecer desatualizado.",
+        tooltip::Position::Bottom,
+    );
+    let chip = tip(chip, "Trocar de branch ou criar uma nova", tooltip::Position::Bottom);
 
     container(
         row![
-            text(branch.unwrap_or_default()).size(13),
-            button(text("↻").size(13)).on_press(Message::Tab(id, WsMessage::Refresh)).style(button::text),
-            net,
-            status,
-            space::horizontal(),
-            toggles,
+            chip,
+            refresh,
+            divider(),
+            tool(icons::FETCH, "Fetch", 0, Some(Op::Fetch), "Fetch: baixa as novidades de todos os remotos sem mexer nas suas branches.".into()),
+            tool(icons::PULL, "Pull", up.map_or(0, |u| u.behind), up.map(|_| Op::Pull), pull_help),
+            tool(icons::PUSH, "Push", up.map_or(0, |u| u.ahead), current.map(|branch| Op::Push { branch, force: false }), push_help),
+            divider(),
+            tool(icons::STASH, "Stash", 0, has_changes.then_some(Op::StashPush), stash_help.into()),
+            tool(icons::POP, "Pop", 0, has_stash.then(|| Op::StashPop("stash@{0}".into())), pop_help.into()),
         ]
-        .spacing(10)
+        .spacing(4)
         .align_y(Alignment::Center),
     )
-    .padding([4, 10])
+    .padding([5, 10])
+    .width(Fill)
     .style(style::bar)
     .into()
+}
+
+/// Bottom bar: one icon per panel on the left (bright when open), status on the right.
+fn status_bar(app: &App) -> Element<'_, Message> {
+    let p = style::p();
+    let mut toggles = row![].spacing(2).align_y(Alignment::Center);
+    for kind in PaneKind::ALL {
+        let open = app.layout.is_visible(kind);
+        let toggle = button(icons::icon(kind.icon(), 14.0))
+            .on_press(Message::TogglePane(kind))
+            .style(style::pane_toggle(open))
+            .padding([3, 7]);
+        let action = if open { "fechar" } else { "abrir" };
+        toggles = toggles.push(tip(toggle, format!("{} ({action})", kind.title()), tooltip::Position::Top));
+    }
+    let reset = button(icons::icon(icons::LAYOUT, 13.0))
+        .on_press(Message::ResetLayout)
+        .style(style::pane_toggle(false))
+        .padding([3, 7]);
+    toggles = toggles
+        .push(container(space()).width(1).height(14).style(style::divider))
+        .push(tip(reset, "Restaurar o layout padrão dos painéis", tooltip::Position::Top));
+
+    let ws = app.tabs.get(app.active).map(|t| &t.ws);
+    let up = ws.and_then(|ws| ws.repo.as_ref()).and_then(|r| r.upstream.as_ref());
+    let status: Element<_> = match ws.map(|ws| (&ws.busy, ws.loading)) {
+        Some((Some(b), _)) => row![icons::icon(icons::LOADER, 12.0).color(p.warn), text(b).size(12).color(p.warn)]
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .into(),
+        Some((None, true)) => text("atualizando…").size(12).into(),
+        _ => space().into(),
+    };
+    let upstream: Element<_> = match up {
+        Some(u) => row![icons::icon(icons::UPSTREAM, 12.0), text(&u.name).size(12)].spacing(6).align_y(Alignment::Center).into(),
+        None => space().into(),
+    };
+
+    container(row![toggles, space::horizontal(), status, upstream].spacing(14).align_y(Alignment::Center))
+        .padding([1, 8])
+        .height(26)
+        .align_y(Alignment::Center)
+        .style(style::status_bar)
+        .into()
+}
+
+/// `content` with a small explanation shown on hover.
+fn tip<'a>(content: impl Into<Element<'a, Message>>, label: impl Into<String>, position: tooltip::Position) -> Element<'a, Message> {
+    let label = container(text(label.into()).size(12)).padding([5, 9]).max_width(340).style(style::popover);
+    tooltip(content, label, position).gap(6).into()
 }
 
 /// Shown while a merge/rebase/cherry-pick/revert waits for conflict resolution.
@@ -252,12 +353,13 @@ fn body(app: &App) -> Element<'_, Message> {
     };
 
     let Some(panes) = &app.panes else {
-        return center(text("Todos os painéis estão fechados. Reabra pela barra acima.").color(style::p().muted)).into();
+        return center(text("Todos os painéis estão fechados. Reabra pelos ícones do rodapé.").color(style::p().muted)).into();
     };
 
     let grid = PaneGrid::new(panes, move |pane, kind, maximized| {
         let content: Element<'_, WsMessage> = match kind {
             PaneKind::Sidebar => sidebar(ws, repo),
+            PaneKind::Reflog => reflog(ws, repo),
             PaneKind::Graph => match &ws.file_view {
                 Some(fv) => view_file::file_viewer(ws, fv),
                 None => graph(ws, repo, &app.avatars),
@@ -266,17 +368,20 @@ fn body(app: &App) -> Element<'_, Message> {
             PaneKind::Session => session_panel(ws),
         };
         let toggle_max = if maximized { Message::RestorePanes } else { Message::MaximizePane(pane) };
+        let control = |glyph: char, msg: Message| button(icons::icon(glyph, 12.0)).on_press(msg).style(style::ghost).padding([3, 5]);
         let controls = row![
-            button(text(if maximized { "❐" } else { "⤢" }).size(12))
-                .on_press(toggle_max)
-                .style(button::text)
-                .padding([1, 6]),
-            button(text("✕").size(12))
-                .on_press(Message::TogglePane(*kind))
-                .style(button::text)
-                .padding([1, 6]),
-        ];
-        let title = pane_grid::TitleBar::new(text(kind.title()).size(12).color(style::p().muted))
+            control(if maximized { icons::RESTORE } else { icons::MAXIMIZE }, toggle_max),
+            control(icons::CLOSE, Message::TogglePane(*kind)),
+        ]
+        .spacing(2);
+        let heading = row![
+            icons::icon(icons::GRIP, 11.0).color(style::p().muted.scale_alpha(0.6)),
+            icons::icon(kind.icon(), 12.0),
+            text(kind.title()).size(12),
+        ]
+        .spacing(7)
+        .align_y(Alignment::Center);
+        let title = pane_grid::TitleBar::new(heading)
             .controls(pane_grid::Controls::new(controls))
             .always_show_controls()
             .padding([3, 8])
@@ -286,7 +391,8 @@ fn body(app: &App) -> Element<'_, Message> {
             .style(style::panel)
     })
     .spacing(4)
-    .on_resize(8, Message::PaneResized);
+    .on_resize(8, Message::PaneResized)
+    .on_drag(Message::PaneDragged);
 
     container(grid).padding(4).width(Fill).height(Fill).into()
 }
@@ -392,27 +498,78 @@ fn sidebar<'a>(ws: &'a Workspace, repo: &'a RepoData) -> Element<'a, WsMessage> 
     scrollable(list.padding(8)).height(Fill).into()
 }
 
+/// Recent movements of HEAD; a click shows the commit, right-click opens its menu.
+fn reflog<'a>(ws: &'a Workspace, repo: &'a RepoData) -> Element<'a, WsMessage> {
+    let p = style::p();
+    if repo.reflog.is_empty() {
+        return center(text("Reflog vazio.").size(13).color(p.muted)).into();
+    }
+    let now = util::now_secs();
+    let mut list = column![].spacing(1);
+    for entry in &repo.reflog {
+        let selected = ws.selection == Selection::Commit(entry.id.clone());
+        let kind = entry.action.split([' ', '(']).next().unwrap_or_default();
+        let color = match kind {
+            "commit" | "merge" | "cherry-pick" => p.added,
+            "checkout" | "switch" => p.accent,
+            "reset" => p.removed,
+            "rebase" | "pull" => p.purple,
+            _ => p.muted,
+        };
+        let tag = container(text(entry.action.clone()).size(10)).padding([1, 6]).style(style::pill(color));
+        let head = row![
+            text(entry.selector.clone()).size(11).font(Font::MONOSPACE).color(p.muted),
+            text(crate::actions::short(&entry.id).to_owned()).size(11).font(Font::MONOSPACE).color(p.accent),
+            tag,
+            space::horizontal(),
+            text(util::relative_time(entry.time, now)).size(11).color(p.muted),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
+        let message = if entry.message.is_empty() { entry.action.clone() } else { entry.message.clone() };
+        let item = button(column![head, text(message).size(12).wrapping(text::Wrapping::None)].spacing(3))
+            .on_press(WsMessage::SelectReflog(entry.id.clone()))
+            .style(if selected { button::secondary } else { button::text })
+            .padding([5, 8])
+            .width(Fill);
+        list = list.push(mouse_area(item).on_right_press(WsMessage::OpenMenu(Target::Commit(entry.id.clone()))));
+    }
+    scrollable(list.padding(6)).height(Fill).into()
+}
+
 fn graph<'a>(ws: &'a Workspace, repo: &'a RepoData, avatars: &'a Avatars) -> Element<'a, WsMessage> {
     let selected = match &ws.selection {
         Selection::Commit(id) => repo.commit_index(id),
         _ => None,
     };
-    let view = GraphView { data: repo, avatars, selected, cache: &ws.graph_cache, now: util::now_secs() };
+    let view = GraphView {
+        data: repo,
+        avatars,
+        selected,
+        worktree_selected: ws.selection == Selection::Worktree,
+        cache: &ws.graph_cache,
+        now: util::now_secs(),
+    };
     let height = view.height();
-    scrollable(canvas(view).width(Fill).height(height)).id(GRAPH_SCROLL).height(Fill).into()
+    // Two canvases so popups get their own layer; see `widgets::graph`.
+    let layers = stack![canvas(GraphBase(view)).width(Fill).height(height), canvas(view).width(Fill).height(height)];
+    scrollable(layers).id(GRAPH_SCROLL).height(Fill).into()
 }
 
 fn session_panel(ws: &Workspace) -> Element<'_, WsMessage> {
     let names: Vec<String> = ws.tools.iter().map(|t| t.name.clone()).collect();
     let running = ws.session_running();
 
+    let p = style::p();
+    let labeled = |glyph: char, label: &'static str| row![icons::icon(glyph, 12.0), text(label).size(13)].spacing(7).align_y(Alignment::Center);
     let action = if running {
-        button("■ Parar").on_press(WsMessage::StopSession).style(button::danger)
+        button(labeled(icons::STOP, "Parar")).on_press(WsMessage::StopSession).style(style::soft(p.removed))
     } else {
-        button("▶ Iniciar sessão")
+        button(labeled(icons::PLAY, "Iniciar sessão"))
             .on_press_maybe(ws.repo.as_ref().map(|_| WsMessage::StartSession))
-            .style(button::success)
-    };
+            .style(style::soft(p.accent))
+    }
+    .padding([5, 12]);
 
     let status = match &ws.session {
         Some(s) if s.running => {
@@ -428,9 +585,9 @@ fn session_panel(ws: &Workspace) -> Element<'_, WsMessage> {
     };
 
     let bar = row![
-        pick_list(names, ws.tool.clone(), WsMessage::ToolSelected).text_size(13),
+        pick_list(names, ws.tool.clone(), WsMessage::ToolSelected).text_size(13).padding([5, 10]).style(style::quiet_pick_list),
         action,
-        text(status).size(12).color(style::p().muted).width(Fill),
+        text(status).size(12).color(p.muted).width(Fill),
     ]
     .spacing(10)
     .align_y(Alignment::Center);

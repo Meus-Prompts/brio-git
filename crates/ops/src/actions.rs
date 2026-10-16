@@ -195,6 +195,46 @@ pub fn stash_list(git: &Git) -> Result<Vec<Stash>> {
         .collect())
 }
 
+// ---- reflog ----
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReflogEntry {
+    /// `HEAD@{n}`
+    pub selector: String,
+    pub id: String,
+    /// What moved HEAD: `commit`, `checkout`, `reset`, `rebase (finish)`…
+    pub action: String,
+    /// The rest of the reflog message.
+    pub message: String,
+    /// When HEAD moved (not the commit date).
+    pub time: i64,
+}
+
+/// The `limit` most recent movements of HEAD, newest first.
+pub fn reflog(git: &Git, limit: usize) -> Result<Vec<ReflogEntry>> {
+    let limit = format!("-n{limit}");
+    // With --date=unix, %gd is `HEAD@{<timestamp>}`; the index comes from the position.
+    let out = git.run(&["reflog", "show", "--date=unix", &limit, "--format=%H%x1f%gd%x1f%gs", "HEAD"])?;
+    Ok(out
+        .lines()
+        .enumerate()
+        .filter_map(|(n, l)| {
+            let mut f = l.split('\x1f');
+            let id = f.next()?.to_owned();
+            let time = f.next()?.strip_prefix("HEAD@{")?.strip_suffix('}')?.parse().unwrap_or_default();
+            let subject = f.next().unwrap_or_default();
+            let (action, message) = subject.split_once(": ").unwrap_or((subject, ""));
+            Some(ReflogEntry {
+                selector: format!("HEAD@{{{n}}}"),
+                id,
+                action: action.to_owned(),
+                message: message.to_owned(),
+                time,
+            })
+        })
+        .collect())
+}
+
 /// Stashes everything, untracked files included.
 pub fn stash_push(git: &Git, message: &str) -> Result<()> {
     git.run(&["stash", "push", "--include-untracked", "-m", message]).map(drop)
@@ -502,6 +542,31 @@ mod tests {
         assert_eq!(in_progress(&git_dir), Some(InProgress::Rebase));
         abort_op(&git, InProgress::Rebase).unwrap();
         assert_eq!(in_progress(&git_dir), None);
+    }
+
+    #[test]
+    fn reflog_keeps_commits_lost_by_reset() {
+        let (dir, git) = repo();
+        fs::write(dir.path().join("a.txt"), "two\n").unwrap();
+        stage(&git, &["a.txt".into()]).unwrap();
+        commit(&git, "second", false).unwrap();
+        let lost = git.run(&["rev-parse", "HEAD"]).unwrap().trim().to_owned();
+        reset(&git, ResetMode::Hard, "HEAD~1").unwrap();
+        create_branch(&git, "feat", "HEAD", true).unwrap();
+
+        let log = reflog(&git, 50).unwrap();
+        assert_eq!(log.len(), 4, "{log:?}");
+        assert_eq!(log[0].selector, "HEAD@{0}");
+        assert_eq!(log[0].action, "checkout");
+        assert_eq!(log[0].message, "moving from main to feat");
+        assert_eq!(log[1].action, "reset");
+        assert_eq!(log[2].selector, "HEAD@{2}");
+        assert_eq!(log[2].id, lost);
+        assert_eq!(log[2].action, "commit");
+        assert_eq!(log[2].message, "second");
+        assert_eq!(log[3].action, "commit (initial)");
+        assert!(log.iter().all(|e| e.time > 1_600_000_000), "{log:?}");
+        assert_eq!(reflog(&git, 2).unwrap().len(), 2);
     }
 
     #[test]

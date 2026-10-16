@@ -9,6 +9,8 @@ use crate::workspace::{DialogKind, WsMessage};
 /// What was right-clicked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
+    /// The "uncommitted changes" row of the graph.
+    Worktree,
     Commit(String),
     /// Local branch, or remote branch like `origin/feat` when `remote`.
     Branch { name: String, remote: bool },
@@ -69,6 +71,7 @@ pub fn build(repo: &RepoData, pinned: Option<&str>, target: &Target) -> Vec<Menu
     let cur = current.unwrap_or("HEAD");
     let remote = repo.main_remote();
     match target {
+        Target::Worktree => worktree_menu(repo),
         Target::Commit(id) => commit_menu(repo, id, cur),
         Target::Branch { name, remote: false } => local_branch_menu(repo, name, current, cur, remote, pinned),
         Target::Branch { name, remote: true } => remote_branch_menu(name, cur),
@@ -79,6 +82,27 @@ pub fn build(repo: &RepoData, pinned: Option<&str>, target: &Target) -> Vec<Menu
             op("Descartar", Op::StashDrop(name.clone())).danger().divided(),
         ],
     }
+}
+
+fn worktree_menu(repo: &RepoData) -> Vec<MenuItem> {
+    let unstaged = repo.changes.iter().filter(|c| c.unstaged);
+    let (untracked, paths): (Vec<_>, Vec<_>) = unstaged.partition(|c| c.kind == brio_ops::ChangeKind::Untracked);
+    let names = |v: Vec<&brio_ops::FileChange>| v.into_iter().map(|c| c.path.clone()).collect::<Vec<_>>();
+    let mut discard = op(
+        "Descartar alterações fora do stage…",
+        Op::Discard { paths: names(paths), untracked: names(untracked) },
+    )
+    .danger()
+    .divided();
+    if !repo.changes.iter().any(|c| c.unstaged) {
+        discard.action = None;
+    }
+    vec![
+        MenuItem::new("Fazer stage de tudo", WsMessage::StageAll),
+        MenuItem::new("Remover tudo do stage", WsMessage::UnstageAll),
+        op("Guardar no stash", Op::StashPush).divided(),
+        discard,
+    ]
 }
 
 fn commit_menu(repo: &RepoData, id: &str, cur: &str) -> Vec<MenuItem> {

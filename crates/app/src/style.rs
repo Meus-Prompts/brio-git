@@ -6,7 +6,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use iced::widget::container;
+use iced::widget::{button, container, pick_list, text_input};
 use iced::{Border, Color, Theme, color};
 
 #[derive(Debug, Clone, Copy)]
@@ -197,6 +197,166 @@ pub fn pane_title(_: &Theme) -> container::Style {
         border: Border { color: p.border, width: 1.0, radius: 0.0.into() },
         text_color: Some(p.muted),
         ..Default::default()
+    }
+}
+
+/// The bottom status bar.
+pub fn status_bar(_: &Theme) -> container::Style {
+    let p = p();
+    container::Style {
+        background: Some(p.title.into()),
+        border: Border { color: p.border, width: 1.0, radius: 0.0.into() },
+        text_color: Some(p.muted),
+        ..Default::default()
+    }
+}
+
+/// Flat toolbar button: muted text, a faint wash on hover, no frame.
+pub fn ghost(_: &Theme, status: button::Status) -> button::Style {
+    let p = p();
+    let (background, text_color) = match status {
+        button::Status::Active => (None, p.muted),
+        button::Status::Hovered => (Some(p.text.scale_alpha(0.08)), p.text),
+        button::Status::Pressed => (Some(p.text.scale_alpha(0.14)), p.text),
+        button::Status::Disabled => (None, p.muted.scale_alpha(0.4)),
+    };
+    button::Style {
+        background: background.map(Into::into),
+        text_color,
+        border: Border { radius: 6.0.into(), ..Default::default() },
+        ..Default::default()
+    }
+}
+
+/// Panel toggle in the status bar: bright when the panel is open, muted when closed.
+pub fn pane_toggle(open: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let p = p();
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: hovered.then(|| p.text.scale_alpha(0.08).into()),
+            text_color: if open { p.text } else if hovered { p.text.scale_alpha(0.8) } else { p.muted.scale_alpha(0.7) },
+            border: Border { radius: 4.0.into(), ..Default::default() },
+            ..Default::default()
+        }
+    }
+}
+
+/// Small rounded counter next to a label (commits to pull or push).
+pub fn pill(color: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: Some(color.scale_alpha(0.18).into()),
+        border: Border { radius: 8.0.into(), ..Default::default() },
+        text_color: Some(color),
+        ..Default::default()
+    }
+}
+
+/// Thin vertical divider between toolbar groups.
+pub fn divider(_: &Theme) -> container::Style {
+    container::Style { background: Some(p().border.into()), ..Default::default() }
+}
+
+/// A filter field without its own frame, inside a popover.
+pub fn bare_input(_: &Theme, status: text_input::Status) -> text_input::Style {
+    let p = p();
+    let focused = matches!(status, text_input::Status::Focused { .. });
+    text_input::Style {
+        background: Color::TRANSPARENT.into(),
+        border: Border { color: if focused { p.accent.scale_alpha(0.5) } else { Color::TRANSPARENT }, width: 1.0, radius: 6.0.into() },
+        icon: p.muted,
+        placeholder: p.muted,
+        value: p.text,
+        selection: p.accent.scale_alpha(0.35),
+    }
+}
+
+/// A row of a popover list; `highlighted` is the keyboard selection.
+pub fn list_item(_: &Theme, status: button::Status, highlighted: bool) -> button::Style {
+    let p = p();
+    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+    button::Style {
+        background: if highlighted {
+            Some(p.selected.into())
+        } else {
+            hovered.then(|| p.text.scale_alpha(0.06).into())
+        },
+        text_color: p.text,
+        border: Border { radius: 5.0.into(), ..Default::default() },
+        ..Default::default()
+    }
+}
+
+/// Floating panel anchored to a control (branch picker).
+pub fn popover(_: &Theme) -> container::Style {
+    let p = p();
+    container::Style {
+        background: Some(p.panel_alt.into()),
+        border: Border { color: p.border, width: 1.0, radius: 8.0.into() },
+        text_color: Some(p.text),
+        shadow: iced::Shadow { color: Color::from_rgba(0.0, 0.0, 0.0, 0.4), offset: iced::Vector::new(0.0, 6.0), blur_radius: 18.0 },
+        ..Default::default()
+    }
+}
+
+/// The branch chip as a button that opens the branch picker.
+pub fn chip_button(_: &Theme, status: button::Status) -> button::Style {
+    let p = p();
+    let alpha = match status {
+        button::Status::Hovered => 0.2,
+        button::Status::Pressed => 0.26,
+        _ => 0.12,
+    };
+    button::Style {
+        background: Some(p.accent.scale_alpha(alpha).into()),
+        border: Border { color: p.accent.scale_alpha(0.35), width: 1.0, radius: 6.0.into() },
+        text_color: p.accent,
+        ..Default::default()
+    }
+}
+
+/// A tinted button: faint fill and thin border in `color` (start/stop the AI session).
+pub fn soft(color: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let (fill, border, text) = match status {
+            button::Status::Active => (0.12, 0.35, color),
+            button::Status::Hovered => (0.2, 0.55, color),
+            button::Status::Pressed => (0.28, 0.6, color),
+            button::Status::Disabled => (0.05, 0.15, color.scale_alpha(0.45)),
+        };
+        button::Style {
+            background: Some(color.scale_alpha(fill).into()),
+            border: Border { color: color.scale_alpha(border), width: 1.0, radius: 6.0.into() },
+            text_color: text,
+            ..Default::default()
+        }
+    }
+}
+
+/// The app mark in the title bar: a rounded square with a diagonal accent gradient.
+pub fn logo(_: &Theme) -> container::Style {
+    let p = p();
+    let gradient = iced::gradient::Linear::new(iced::Radians(std::f32::consts::FRAC_PI_4 * 3.0))
+        .add_stop(0.0, p.accent)
+        .add_stop(1.0, p.purple);
+    container::Style {
+        background: Some(iced::Background::Gradient(gradient.into())),
+        border: Border { radius: 6.0.into(), ..Default::default() },
+        text_color: Some(Color::WHITE),
+        ..Default::default()
+    }
+}
+
+/// The AI tool chooser: a thin outline that brightens on hover.
+pub fn quiet_pick_list(_: &Theme, status: pick_list::Status) -> pick_list::Style {
+    let p = p();
+    let active = !matches!(status, pick_list::Status::Active);
+    pick_list::Style {
+        text_color: p.text,
+        placeholder_color: p.muted,
+        handle_color: p.muted,
+        background: if active { p.text.scale_alpha(0.06) } else { Color::TRANSPARENT }.into(),
+        border: Border { color: if active { p.accent.scale_alpha(0.5) } else { p.border }, width: 1.0, radius: 6.0.into() },
     }
 }
 

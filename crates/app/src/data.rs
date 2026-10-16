@@ -5,11 +5,13 @@ use std::path::{Path, PathBuf};
 
 use brio_core::graph::{self, GraphRow};
 use brio_core::{Commit, Head, Ref, RefKind, Repo};
-use brio_ops::actions::{self, InProgress, Stash, Upstream};
+use brio_ops::actions::{self, InProgress, ReflogEntry, Stash, Upstream};
 use brio_ops::{FileChange, Git};
 
 /// How many commits the graph shows.
 pub const LOG_LIMIT: usize = 2000;
+/// How many HEAD movements the reflog panel shows.
+pub const REFLOG_LIMIT: usize = 300;
 
 #[derive(Debug)]
 pub struct RepoData {
@@ -25,6 +27,8 @@ pub struct RepoData {
     /// Upstream of the current branch, with ahead/behind counts.
     pub upstream: Option<Upstream>,
     pub stashes: Vec<Stash>,
+    /// Recent movements of HEAD, newest first.
+    pub reflog: Vec<ReflogEntry>,
     /// A merge/rebase/cherry-pick/revert stopped by conflicts.
     pub in_progress: Option<InProgress>,
     pub remotes: Vec<String>,
@@ -52,6 +56,7 @@ impl RepoData {
         // Secondary data: a failure here should not hide the repository.
         let upstream = actions::upstream(&git).ok().flatten();
         let stashes = actions::stash_list(&git).unwrap_or_default();
+        let reflog = actions::reflog(&git, REFLOG_LIMIT).unwrap_or_default();
         let remotes = actions::remotes(&git).unwrap_or_default();
         let in_progress = actions::in_progress(repo.git_dir());
 
@@ -66,6 +71,7 @@ impl RepoData {
             changes,
             upstream,
             stashes,
+            reflog,
             in_progress,
             remotes,
         })

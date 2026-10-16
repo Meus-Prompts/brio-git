@@ -15,11 +15,12 @@ use brio_core::RefKind;
 use brio_session::{TermEvent, TermSnapshot, Terminal, Tool, WatchHandle};
 
 use crate::actions::{CheckoutTarget, Op};
+use crate::branch_picker::{self, BranchPicker, Choice};
 use crate::data::RepoData;
 use crate::menu::Target;
 use crate::fileview::{self, Details, FileTarget, FileView, Loaded, Mode};
 use crate::util::{self, blocking};
-use crate::widgets::graph::ROW_H;
+use crate::widgets::graph;
 use crate::keys;
 
 pub const GRAPH_SCROLL: &str = "graph";
@@ -93,6 +94,8 @@ pub struct Workspace {
     /// Local branch kept in the first lane of the graph.
     pub pinned: Option<String>,
     pub dialog: Option<Dialog>,
+    /// Branch switcher opened from the toolbar.
+    pub branch_picker: Option<BranchPicker>,
     /// Label of the git operation running in the background.
     pub busy: Option<String>,
 
@@ -125,6 +128,8 @@ pub enum WsMessage {
     ShowWorktree,
     SelectCommit(String),
     JumpToCommit(String),
+    /// A reflog entry: jumps to it in the graph, or just shows it when unreachable.
+    SelectReflog(String),
     CopyHash(String),
     DetailsLoaded(u64, Result<Arc<Details>, String>),
 
@@ -179,6 +184,15 @@ pub enum WsMessage {
     Key(Key, Modifiers, Option<String>),
     Paste(Option<String>),
 
+    OpenBranchPicker,
+    CloseBranchPicker,
+    /// Escape pressed inside a text field: closes the branch picker or dialog.
+    CloseOverlays,
+    BranchQuery(String),
+    /// Picks the highlighted entry (Enter in the filter).
+    BranchSubmit,
+    PickBranch(Choice),
+
     DismissError,
 }
 
@@ -205,6 +219,7 @@ impl Workspace {
             collapsed_stash: false,
             pinned,
             dialog: None,
+            branch_picker: None,
             busy: None,
             commit_summary: String::new(),
             commit_body: text_editor::Content::new(),
@@ -273,7 +288,8 @@ impl Workspace {
                 let task = self.update(WsMessage::SelectCommit(id));
                 match row {
                     Some(row) => {
-                        let y = (row as f32 * ROW_H - 120.0).max(0.0);
+                        let top = self.repo.as_ref().map_or(0.0, |r| graph::row_top(r, row));
+                        let y = (top - 120.0).max(0.0);
                         Task::batch([task, operation::scroll_to(GRAPH_SCROLL, AbsoluteOffset { x: None, y: Some(y) })])
                     }
                     None => {
@@ -281,6 +297,14 @@ impl Workspace {
                         task
                     }
                 }
+            }
+            WsMessage::SelectReflog(id) => {
+                if self.repo.as_ref().is_some_and(|r| r.commit_index(&id).is_some()) {
+                    return self.update(WsMessage::JumpToCommit(id));
+                }
+                self.file_view = None;
+                self.notice = Some("Commit fora do grafo: nenhuma branch ou tag chega até ele. Crie uma branch aqui para recuperá-lo.".into());
+                self.update(WsMessage::SelectCommit(id))
             }
             WsMessage::CopyHash(id) => {
                 self.notice = Some(format!("Hash {} copiado.", &id[..id.len().min(10)]));
@@ -405,6 +429,56 @@ impl Workspace {
                 self.term_focused = focused && self.terminal.is_some();
                 self.term_cache.clear();
                 Task::none()
+            }
+            WsMessage::Key(key, _, _) if self.branch_picker.is_some() => {
+                use iced::keyboard::key::Named;
+                let count = self.branch_choices().len();
+                match (key, self.branch_picker.as_mut()) {
+                    (Key::Named(Named::Escape), _) => self.branch_picker = None,
+                    (Key::Named(Named::ArrowDown), Some(p)) => p.step(1, count),
+                    (Key::Named(Named::ArrowUp), Some(p)) => p.step(-1, count),
+                    _ => {}
+                }
+                Task::none()
+            }
+            WsMessage::OpenBranchPicker => {
+                self.term_focused = false;
+                self.branch_picker = Some(BranchPicker::default());
+                iced::widget::operation::focus(branch_picker::INPUT)
+            }
+            WsMessage::CloseOverlays => {
+                if self.branch_picker.take().is_none() {
+                    self.dialog = None;
+                }
+                Task::none()
+            }
+            WsMessage::CloseBranchPicker => {
+                self.branch_picker = None;
+                Task::none()
+            }
+            WsMessage::BranchQuery(query) => {
+                if let Some(p) = self.branch_picker.as_mut() {
+                    p.query = query;
+                    p.highlighted = 0;
+                }
+                Task::none()
+            }
+            WsMessage::BranchSubmit => {
+                let index = self.branch_picker.as_ref().map_or(0, |p| p.highlighted);
+                match self.branch_choices().into_iter().nth(index) {
+                    Some(choice) => self.update(WsMessage::PickBranch(choice)),
+                    None => Task::none(),
+                }
+            }
+            WsMessage::PickBranch(choice) => {
+                self.branch_picker = None;
+                let current = self.repo.as_ref().and_then(|r| r.current_branch().map(str::to_owned));
+                match choice {
+                    Choice::Local(name) if Some(&name) == current.as_ref() => Task::none(),
+                    Choice::Local(name) => self.request(Op::Checkout(CheckoutTarget::Branch(name))),
+                    Choice::Remote(name) => self.request(Op::Checkout(CheckoutTarget::Remote(name))),
+                    Choice::Create(name) => self.request(Op::CreateBranch { name, at: "HEAD".into(), checkout: true }),
+                }
             }
             WsMessage::Key(key, _, _) if self.dialog.is_some() => {
                 if key == Key::Named(iced::keyboard::key::Named::Escape) {
@@ -614,8 +688,10 @@ impl Workspace {
         }
 
         // Keep the selection meaningful after a refresh.
+        // Commits picked from the reflog may be unreachable, yet still exist.
         if let Selection::Commit(id) = &self.selection
             && data.commit_index(id).is_none()
+            && !data.reflog.iter().any(|e| &e.id == id)
         {
             self.selection = Selection::Worktree;
         }
@@ -667,6 +743,14 @@ impl Workspace {
         Task::perform(blocking(move || Ok(job())), move |r: Result<Loaded, String>| {
             WsMessage::FileLoaded(token, r.unwrap_or_else(|e| Loaded::Diff(Err(e))))
         })
+    }
+
+    /// Entries of the open branch picker for its current query.
+    pub fn branch_choices(&self) -> Vec<Choice> {
+        match (&self.repo, &self.branch_picker) {
+            (Some(repo), Some(p)) => branch_picker::choices(repo, &p.query),
+            _ => Vec::new(),
+        }
     }
 
     fn is_dirty(&self) -> bool {

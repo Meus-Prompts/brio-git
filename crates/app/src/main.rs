@@ -1,9 +1,11 @@
 mod actions;
 mod app;
 mod avatars;
+mod branch_picker;
 mod data;
 mod fileview;
 mod highlight;
+mod icons;
 mod keys;
 mod layout;
 mod menu;
@@ -29,6 +31,7 @@ fn main() -> iced::Result {
         .title(App::title)
         .subscription(App::subscription)
         .theme(App::theme)
+        .font(icons::FONT_BYTES)
         .window(iced::window::Settings {
             size: iced::Size::new(1440.0, 920.0),
             min_size: Some(iced::Size::new(720.0, 480.0)),

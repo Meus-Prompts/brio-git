@@ -5,14 +5,19 @@ use std::cell::Cell;
 
 use iced::mouse;
 use iced::widget::canvas::{self, Geometry};
-use iced::widget::{button, canvas as canvas_widget, center, checkbox, column, container, mouse_area, opaque, row, space, stack, text, text_input};
-use iced::{Alignment, Element, Fill, Padding, Point, Rectangle, Renderer, Theme};
+use iced::widget::{
+    button, canvas as canvas_widget, center, checkbox, column, container, mouse_area, opaque, row, scrollable, space, stack, text,
+    text_input,
+};
+use iced::{Alignment, Element, Fill, Font, Length, Padding, Point, Rectangle, Renderer, Theme};
 
 use crate::actions::CheckoutTarget;
+use crate::branch_picker::{self, BranchPicker, Choice};
+use crate::icons;
 use crate::app::{App, ContextMenu, Message, TabId};
 use crate::menu::{MenuItem, rev_label};
 use crate::style;
-use crate::workspace::{DIALOG_INPUT, Dialog, DialogKind, WsMessage};
+use crate::workspace::{DIALOG_INPUT, Dialog, DialogKind, Workspace, WsMessage};
 
 const MENU_W: f32 = 300.0;
 const SUBMENU_W: f32 = 320.0;
@@ -184,4 +189,79 @@ pub fn dialog<'a>(id: TabId, d: &'a Dialog) -> Element<'a, Message> {
     let backdrop = mouse_area(container(space()).width(Fill).height(Fill).style(style::backdrop))
         .on_press(Message::Tab(id, WsMessage::DialogCancel));
     stack![backdrop, center(opaque(card))].into()
+}
+
+/// The branch switcher, opened under the branch chip of the toolbar.
+pub fn branch_picker<'a>(id: TabId, ws: &'a Workspace, picker: &'a BranchPicker) -> Element<'a, Message> {
+    let p = style::p();
+    let current = ws.repo.as_ref().and_then(|r| r.current_branch());
+    let choices = ws.branch_choices();
+
+    let input = text_input("Trocar para… ou digite um nome novo", &picker.query)
+        .id(branch_picker::INPUT)
+        .on_input(WsMessage::BranchQuery)
+        .on_submit(WsMessage::BranchSubmit)
+        .size(13)
+        .padding([6, 8])
+        .style(style::bare_input);
+    let search = row![icons::icon(icons::SEARCH, 13.0).color(p.muted), input].spacing(4).align_y(Alignment::Center);
+
+    let mut list = column![].spacing(1);
+    let mut section = None;
+    for (i, choice) in choices.iter().enumerate() {
+        let heading = match choice {
+            Choice::Local(_) => "BRANCHES LOCAIS",
+            Choice::Remote(_) => "REMOTAS",
+            Choice::Create(_) => "",
+        };
+        if section != Some(heading) && !heading.is_empty() {
+            list = list.push(container(text(heading).size(10).color(p.muted)).padding([6, 8]));
+        }
+        section = Some(heading);
+        let (glyph, label): (char, Element<'a, WsMessage>) = match choice {
+            Choice::Local(name) => (icons::GIT_BRANCH, text(name.clone()).size(13).into()),
+            Choice::Remote(name) => (icons::CLOUD, text(name.clone()).size(13).into()),
+            Choice::Create(name) => (
+                icons::BRANCH_PLUS,
+                row![text("Criar branch ").size(13), text(name.clone()).size(13).font(Font::MONOSPACE).color(p.accent), text(" a partir de HEAD").size(13).color(p.muted)].into(),
+            ),
+        };
+        let mut line = row![icons::icon(glyph, 13.0), label, space::horizontal()].spacing(8).align_y(Alignment::Center);
+        if let Choice::Local(name) = choice
+            && Some(name.as_str()) == current
+        {
+            line = line.push(icons::icon(icons::CHECK, 13.0).color(p.accent));
+        }
+        let highlighted = i == picker.highlighted;
+        list = list.push(
+            button(line)
+                .on_press(WsMessage::PickBranch(choice.clone()))
+                .style(move |t: &Theme, s| style::list_item(t, s, highlighted))
+                .padding([5, 8])
+                .width(Fill),
+        );
+    }
+    if choices.is_empty() {
+        list = list.push(container(text("Nenhuma branch encontrada.").size(12).color(p.muted)).padding(8));
+    }
+
+    let hint = text("↑↓ navegar · Enter escolher · Esc fechar").size(11).color(p.muted);
+    let panel = container(
+        column![
+            search,
+            container(space()).width(Fill).height(1).style(style::fill(p.border, 0.0)),
+            scrollable(list).height(Length::Shrink),
+            hint,
+        ]
+        .spacing(6),
+    )
+    .padding(8)
+    .width(380)
+    .max_height(420)
+    .style(style::popover);
+
+    let backdrop = mouse_area(container(space()).width(Fill).height(Fill)).on_press(WsMessage::CloseBranchPicker);
+    let placed = container(opaque(panel)).padding(Padding { top: 76.0, left: 14.0, ..Padding::ZERO });
+    let layer: Element<'a, WsMessage> = stack![backdrop, placed].into();
+    layer.map(move |m| Message::Tab(id, m))
 }

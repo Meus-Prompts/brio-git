@@ -1,18 +1,25 @@
 //! The commit graph: lanes, author avatars, ref badges, summary, hash and
-//! date, drawn on a cached canvas. Hover tooltips are drawn on top, uncached.
+//! date, drawn on a cached canvas ([`GraphBase`]). A second canvas stacked on
+//! top ([`GraphView`]) takes the mouse and draws tooltips and the expanded ref
+//! list. They must be separate canvases: iced draws all the text of a canvas
+//! after all its shapes, so a popup in the same canvas would let the text
+//! under it show through its background.
+//!
+//! With local changes, an "uncommitted changes" row sits above the first commit.
 
 use std::time::{Duration, Instant};
 
 use iced::advanced::image::Image;
 use iced::alignment::Vertical;
 use iced::mouse;
-use iced::widget::canvas::{self, Cache, Frame, Geometry, Path, Stroke, Text};
+use iced::widget::canvas::{self, Cache, Frame, Geometry, LineDash, Path, Stroke, Text};
 use iced::widget::text::Alignment as TextAlign;
 use iced::{Color, Font, Pixels, Point, Rectangle, Renderer, Size, Theme, font};
 use brio_core::graph::Segment;
 use brio_core::{Commit, RefKind};
 
 use crate::avatars::{self, Avatars};
+use crate::icons;
 use crate::menu::Target;
 use crate::data::RepoData;
 use crate::style;
@@ -34,10 +41,13 @@ const ICON_W: f32 = 15.0;
 const POPUP_PAD: f32 = 6.0;
 const POPUP_GAP: f32 = 5.0;
 
+#[derive(Clone, Copy)]
 pub struct GraphView<'a> {
     pub data: &'a RepoData,
     pub avatars: &'a Avatars,
     pub selected: Option<usize>,
+    /// The uncommitted-changes row is selected.
+    pub worktree_selected: bool,
     pub cache: &'a Cache,
     pub now: i64,
 }
@@ -47,7 +57,10 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// Row under the mouse and which part of it.
 #[derive(Default)]
 pub struct Hover {
+    /// Commit index (not screen row) under the mouse.
     row: Option<usize>,
+    /// Mouse over the uncommitted-changes row.
+    wip: bool,
     on_avatar: bool,
     on_hash: bool,
     /// Index into the row's ref groups of the badge under the mouse.
@@ -104,7 +117,7 @@ impl Badges {
         !self.groups.is_empty() && x >= self.x && x <= self.end() - 6.0
     }
 
-    /// The expanded list drawn over row `row`: its frame and one rect per group.
+    /// The expanded list drawn over screen row `row`: its frame and one rect per group.
     /// It opens downwards, or upwards when it would pass `height`.
     fn popup(&self, row: usize, height: f32) -> (Rectangle, Vec<Rectangle>) {
         let w = self.groups.iter().map(Group::width).fold(0.0, f32::max);
@@ -124,13 +137,27 @@ impl Badges {
     }
 }
 
+/// Top of commit `row` on screen, below the uncommitted-changes row if any.
+pub fn row_top(data: &RepoData, row: usize) -> f32 {
+    (row + wip_rows(data)) as f32 * ROW_H
+}
+
+/// Rows drawn above the first commit: 1 when the working tree has changes.
+fn wip_rows(data: &RepoData) -> usize {
+    (!data.changes.is_empty()) as usize
+}
+
 fn lane_x(lane: usize) -> f32 {
     14.0 + lane as f32 * LANE_W
 }
 
 impl GraphView<'_> {
     pub fn height(&self) -> f32 {
-        self.data.commits.len().max(1) as f32 * ROW_H
+        (self.data.commits.len() + wip_rows(self.data)).max(1) as f32 * ROW_H
+    }
+
+    fn top(&self, row: usize) -> f32 {
+        row_top(self.data, row)
     }
 
     fn graph_width(&self) -> f32 {
@@ -203,19 +230,24 @@ impl GraphView<'_> {
     /// What is under `p`; `expanded` is the row whose popup is open, which
     /// stays open (and takes the hit) while the mouse is over it.
     fn hit(&self, p: Point, width: f32, expanded: Option<usize>) -> Hover {
+        let offset = wip_rows(self.data);
         if let Some(row) = expanded {
             let badges = self.badges(row);
-            let (frame, items) = badges.popup(row, self.height());
+            let (frame, items) = badges.popup(row + offset, self.height());
             if frame.contains(p) {
                 let badge = items.iter().position(|r| r.contains(p));
                 return Hover { row: Some(row), badge, expanded: Some(row), cursor: p, ..Hover::default() };
             }
         }
-        let row = (p.y / ROW_H) as usize;
+        let screen = (p.y / ROW_H) as usize;
+        if screen < offset {
+            return Hover { wip: true, cursor: p, ..Hover::default() };
+        }
+        let row = screen - offset;
         if row >= self.data.commits.len() {
             return Hover::default();
         }
-        let center = Point::new(lane_x(self.data.rows[row].lane), row as f32 * ROW_H + ROW_H / 2.0);
+        let center = Point::new(lane_x(self.data.rows[row].lane), self.top(row) + ROW_H / 2.0);
         let hash_x = self.hash_x(width);
         let badges = self.badges(row);
         let on_badges = badges.contains_x(p.x);
@@ -227,6 +259,7 @@ impl GraphView<'_> {
             badge,
             expanded: (on_badges && badges.groups.len() > 1).then_some(row),
             cursor: p,
+            wip: false,
             last_click: None,
         }
     }
@@ -248,6 +281,7 @@ impl canvas::Program<Message> for GraphView<'_> {
                     cursor.position_in(bounds).map(|p| self.hit(p, bounds.width, state.expanded)).unwrap_or_default();
                 hover.last_click = state.last_click;
                 let changed = hover.row != state.row
+                    || hover.wip != state.wip
                     || hover.on_avatar != state.on_avatar
                     || hover.on_avatar
                     || hover.expanded != state.expanded
@@ -258,6 +292,9 @@ impl canvas::Program<Message> for GraphView<'_> {
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let p = cursor.position_in(bounds)?;
                 let hit = self.hit(p, bounds.width, state.expanded);
+                if hit.wip {
+                    return Some(canvas::Action::publish(Message::ShowWorktree).and_capture());
+                }
                 let row = hit.row?;
                 let commit = &self.data.commits[row];
                 let now = Instant::now();
@@ -275,6 +312,9 @@ impl canvas::Program<Message> for GraphView<'_> {
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
                 let p = cursor.position_in(bounds)?;
                 let hit = self.hit(p, bounds.width, state.expanded);
+                if hit.wip {
+                    return Some(canvas::Action::publish(Message::OpenMenu(Target::Worktree)).and_capture());
+                }
                 let row = hit.row?;
                 let groups = self.groups(row);
                 let target = hit
@@ -306,7 +346,7 @@ impl canvas::Program<Message> for GraphView<'_> {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let mut layers = vec![self.cache.draw(renderer, bounds.size(), |frame| self.paint(frame, bounds.width))];
+        let mut layers = Vec::new();
         if let Some(row) = state.row
             && state.on_avatar
         {
@@ -320,6 +360,24 @@ impl canvas::Program<Message> for GraphView<'_> {
             layers.push(frame.into_geometry());
         }
         layers
+    }
+}
+
+/// The cached graph itself, under the [`GraphView`] layer.
+pub struct GraphBase<'a>(pub GraphView<'a>);
+
+impl canvas::Program<Message> for GraphBase<'_> {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        vec![self.0.cache.draw(renderer, bounds.size(), |frame| self.0.paint(frame, bounds.width))]
     }
 }
 
@@ -337,9 +395,12 @@ impl GraphView<'_> {
         let show_hash = hash_x - text_x > 160.0;
         let show_date = show_hash && self.show_date(width);
         let head_id = data.head.id.as_deref();
+        if wip_rows(data) > 0 {
+            self.wip_row(frame, width);
+        }
 
         for (i, (commit, row)) in data.commits.iter().zip(&data.rows).enumerate() {
-            let y0 = i as f32 * ROW_H;
+            let y0 = self.top(i);
             let mid = y0 + ROW_H / 2.0;
             let y1 = y0 + ROW_H;
             let is_head = Some(commit.id.as_str()) == head_id;
@@ -384,6 +445,7 @@ impl GraphView<'_> {
                 let mx = badges.x + badges.first_w + 4.0;
                 let rect = Path::rounded_rectangle(Point::new(mx, y0 + 5.0), Size::new(badges.more_w, BADGE_H), 4.0.into());
                 frame.fill(&rect, p.muted.scale_alpha(0.22));
+                frame.stroke(&rect, Stroke::default().with_color(p.muted.scale_alpha(0.6)).with_width(1.0));
                 frame.fill_text(Text {
                     size: Pixels(12.0),
                     ..text(&format!("+{}", badges.groups.len() - 1), Point::new(mx + 6.0, y0 + 8.0), p.text)
@@ -408,6 +470,38 @@ impl GraphView<'_> {
                 frame.fill_text(text(&util::relative_time(commit.time, self.now), Point::new(date_x, y0 + 7.0), p.muted));
             }
         }
+    }
+
+    /// The uncommitted-changes row: a dashed node in the lane of HEAD, joined to it by a dashed line.
+    fn wip_row(&self, frame: &mut Frame, width: f32) {
+        let p = style::p();
+        let data = self.data;
+        if self.worktree_selected {
+            frame.fill_rectangle(Point::ORIGIN, Size::new(width, ROW_H), p.selected);
+        }
+        let head = data.head.id.as_deref().and_then(|id| data.commit_index(id));
+        let (lane, color) = head.map_or((0, p.accent), |h| (data.rows[h].lane, p.lane(data.rows[h].color)));
+        let center = Point::new(lane_x(lane), ROW_H / 2.0);
+        let dashed = Stroke {
+            line_dash: LineDash { segments: &[3.0, 3.0], offset: 0 },
+            ..Stroke::default().with_color(color).with_width(2.0)
+        };
+        if let Some(h) = head {
+            // Drawn before the commits, so avatars on the way cover it.
+            let to = self.top(h) + ROW_H / 2.0 - AVATAR_R - 1.0;
+            frame.stroke(&Path::line(Point::new(center.x, center.y + AVATAR_R + 1.0), Point::new(center.x, to)), dashed);
+        }
+        frame.stroke(&Path::circle(center, AVATAR_R), dashed);
+
+        let n = data.changes.len();
+        let ink = if self.worktree_selected { p.text } else { p.muted };
+        let x = self.graph_width();
+        frame.fill_text(Text { font: icons::FONT, size: Pixels(13.0), ..text(&icons::PENCIL.to_string(), Point::new(x, 9.0), ink) });
+        let label = format!("Alterações não commitadas · {n} arquivo{}", if n == 1 { "" } else { "s" });
+        frame.fill_text(Text {
+            font: Font { style: font::Style::Italic, ..Font::default() },
+            ..text(&label, Point::new(x + 20.0, 7.0), ink)
+        });
     }
 
     /// One ref group: name, then a computer icon (local) and a cloud (remote).
@@ -449,7 +543,9 @@ impl GraphView<'_> {
     fn popup(&self, frame: &mut Frame, row: usize, hovered: Option<usize>) {
         let p = style::p();
         let badges = self.badges(row);
-        let (rect, items) = badges.popup(row, self.height());
+        let (rect, items) = badges.popup(row + wip_rows(self.data), self.height());
+        let shadow = Path::rounded_rectangle(rect.position() + iced::Vector::new(0.0, 3.0), rect.size(), 7.0.into());
+        frame.fill(&shadow, Color::from_rgba(0.0, 0.0, 0.0, 0.35));
         let path = Path::rounded_rectangle(rect.position(), rect.size(), 6.0.into());
         frame.fill(&path, p.panel_alt);
         frame.stroke(&path, Stroke::default().with_color(p.border).with_width(1.0));
@@ -585,5 +681,66 @@ fn truncate(s: &str, width: f32) -> String {
         let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
         out.push('…');
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn repo(dirty: bool) -> (tempfile::TempDir, RepoData) {
+        let dir = tempfile::tempdir().unwrap();
+        let git = brio_ops::Git::new(dir.path());
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["config", "user.name", "Ana"],
+            &["config", "user.email", "ana@x.dev"],
+            &["config", "commit.gpgsign", "false"],
+        ] {
+            git.run(args).unwrap();
+        }
+        fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        git.run(&["add", "."]).unwrap();
+        git.run(&["commit", "-qm", "first"]).unwrap();
+        if dirty {
+            fs::write(dir.path().join("a.txt"), "two\n").unwrap();
+        }
+        let data = RepoData::load(dir.path(), None).unwrap();
+        (dir, data)
+    }
+
+    fn view<'a>(data: &'a RepoData, avatars: &'a Avatars, cache: &'a Cache) -> GraphView<'a> {
+        GraphView { data, avatars, selected: None, worktree_selected: false, cache, now: 0 }
+    }
+
+    #[test]
+    fn local_changes_add_a_row_above_the_commits() {
+        let (avatars, cache) = (Avatars::default(), Cache::new());
+        let (_d, data) = repo(true);
+        let g = view(&data, &avatars, &cache);
+        assert_eq!(g.height(), 2.0 * ROW_H);
+        assert_eq!(row_top(&data, 0), ROW_H);
+
+        let wip = g.hit(Point::new(200.0, ROW_H / 2.0), 800.0, None);
+        assert!(wip.wip);
+        assert_eq!(wip.row, None);
+
+        let first = g.hit(Point::new(200.0, ROW_H * 1.5), 800.0, None);
+        assert!(!first.wip);
+        assert_eq!(first.row, Some(0));
+        assert_eq!(g.hit(Point::new(200.0, ROW_H * 2.5), 800.0, None).row, None);
+    }
+
+    #[test]
+    fn clean_tree_has_no_extra_row() {
+        let (avatars, cache) = (Avatars::default(), Cache::new());
+        let (_d, data) = repo(false);
+        let g = view(&data, &avatars, &cache);
+        assert_eq!(g.height(), ROW_H);
+        assert_eq!(row_top(&data, 0), 0.0);
+        let first = g.hit(Point::new(200.0, ROW_H / 2.0), 800.0, None);
+        assert!(!first.wip);
+        assert_eq!(first.row, Some(0));
     }
 }

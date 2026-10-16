@@ -71,6 +71,8 @@ pub enum Message {
     FolderPicked(Option<PathBuf>),
 
     PaneResized(pane_grid::ResizeEvent),
+    PaneDragged(pane_grid::DragEvent),
+    ResetLayout,
     TogglePane(PaneKind),
     MaximizePane(pane_grid::Pane),
     RestorePanes,
@@ -92,6 +94,7 @@ pub enum Message {
     AvatarLoaded(String, Option<avatars::Picture>),
 
     Key(Key, Modifiers, Option<String>),
+    EscapeInField,
     DismissError,
 }
 
@@ -167,6 +170,11 @@ impl App {
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, text, .. }),
                 event::Status::Ignored,
             ) => Some(Message::Key(key, modifiers, text.map(|t| t.to_string()))),
+            // A focused text field eats Escape (it only drops focus); popups still close on it.
+            (
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key: Key::Named(keyboard::key::Named::Escape), .. }),
+                event::Status::Captured,
+            ) => Some(Message::EscapeInField),
             _ => None,
         });
         let close = window::close_requests().map(|_| Message::Close);
@@ -257,6 +265,21 @@ impl App {
                 }
                 Task::none()
             }
+            Message::PaneDragged(pane_grid::DragEvent::Dropped { pane, target }) => {
+                if let Some(panes) = self.panes.as_mut() {
+                    panes.drop(pane, target);
+                    self.layout.capture(panes);
+                }
+                self.save();
+                Task::none()
+            }
+            Message::PaneDragged(_) => Task::none(),
+            Message::ResetLayout => {
+                self.layout.reset();
+                self.panes = self.layout.build();
+                self.save();
+                Task::none()
+            }
             Message::TogglePane(kind) => {
                 let visible = self.layout.is_visible(kind);
                 self.layout.set_visible(kind, !visible);
@@ -333,6 +356,10 @@ impl App {
                 }
                 Task::none()
             }
+            Message::EscapeInField => match self.active_id() {
+                Some(id) => self.forward(id, WsMessage::CloseOverlays),
+                None => Task::none(),
+            },
             Message::Key(key, mods, text) => match self.active_id() {
                 Some(id) => self.forward(id, WsMessage::Key(key, mods, text)),
                 None => Task::none(),
