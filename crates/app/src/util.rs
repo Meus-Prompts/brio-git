@@ -67,6 +67,15 @@ where
     }
 }
 
+/// Version of this build, set by the release pipeline (`BRIO_VERSION`); `dev` for local builds.
+pub const VERSION: &str = match option_env!("BRIO_VERSION") {
+    Some(v) => v,
+    None => "dev",
+};
+
+/// Commit this build was made from, set by the release pipeline (`BRIO_COMMIT`).
+pub const COMMIT: Option<&str> = option_env!("BRIO_COMMIT");
+
 #[cfg(test)]
 mod tests {
     use super::*;

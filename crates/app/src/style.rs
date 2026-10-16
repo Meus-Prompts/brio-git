@@ -163,16 +163,6 @@ pub fn root(_: &Theme) -> container::Style {
     container::Style { background: Some(p().bg.into()), text_color: Some(p().text), ..Default::default() }
 }
 
-pub fn error(_: &Theme) -> container::Style {
-    let p = p();
-    container::Style {
-        background: Some(p.removed.scale_alpha(0.18).into()),
-        border: Border { color: p.removed, width: 1.0, radius: 4.0.into() },
-        text_color: Some(p.text),
-        ..Default::default()
-    }
-}
-
 pub fn title_bar(_: &Theme) -> container::Style {
     container::Style { background: Some(p().title.into()), text_color: Some(p().text), ..Default::default() }
 }
@@ -297,6 +287,11 @@ pub fn popover(_: &Theme) -> container::Style {
         shadow: iced::Shadow { color: Color::from_rgba(0.0, 0.0, 0.0, 0.4), offset: iced::Vector::new(0.0, 6.0), blur_radius: 18.0 },
         ..Default::default()
     }
+}
+
+/// A toast: the popover look with its border tinted by the message kind.
+pub fn toast(color: Color) -> impl Fn(&Theme) -> container::Style {
+    move |theme| container::Style { border: Border { color: color.scale_alpha(0.55), width: 1.0, radius: 8.0.into() }, ..popover(theme) }
 }
 
 /// The branch chip as a button that opens the branch picker.

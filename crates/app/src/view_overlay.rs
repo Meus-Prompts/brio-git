@@ -17,6 +17,7 @@ use crate::icons;
 use crate::app::{App, ContextMenu, Message, TabId};
 use crate::menu::{MenuItem, rev_label};
 use crate::style;
+use crate::toasts::{self, Toasts};
 use crate::workspace::{DIALOG_INPUT, Dialog, DialogKind, Workspace, WsMessage};
 
 const MENU_W: f32 = 300.0;
@@ -264,4 +265,36 @@ pub fn branch_picker<'a>(id: TabId, ws: &'a Workspace, picker: &'a BranchPicker)
     let placed = container(opaque(panel)).padding(Padding { top: 76.0, left: 14.0, ..Padding::ZERO });
     let layer: Element<'a, WsMessage> = stack![backdrop, placed].into();
     layer.map(move |m| Message::Tab(id, m))
+}
+
+/// Toasts stacked in the bottom-right corner, above the status bar; newest last.
+pub fn toasts(toasts: &Toasts) -> Element<'_, Message> {
+    let p = style::p();
+    let mut stack_col = column![].spacing(8).width(360);
+    for t in toasts.items() {
+        let (glyph, color) = match t.kind {
+            toasts::Kind::Info => (icons::SUCCESS, p.added),
+            toasts::Kind::Error => (icons::ALERT, p.removed),
+        };
+        let mut body = column![].spacing(2).width(Fill);
+        if let Some(source) = &t.source {
+            body = body.push(text(source.clone()).size(11).color(p.muted));
+        }
+        body = body.push(text(t.text.clone()).size(13));
+        let content = row![
+            icons::icon(glyph, 15.0).color(color),
+            body,
+            button(icons::icon(icons::CLOSE, 12.0)).on_press(Message::DismissToast(t.id)).style(style::ghost).padding([3, 5]),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Start);
+        stack_col = stack_col.push(opaque(container(content).padding([10, 12]).width(Fill).style(style::toast(color))));
+    }
+    container(stack_col)
+        .width(Fill)
+        .height(Fill)
+        .align_x(Alignment::End)
+        .align_y(Alignment::End)
+        .padding(Padding { right: 16.0, bottom: 38.0, ..Padding::ZERO })
+        .into()
 }

@@ -14,7 +14,7 @@ use crate::actions::Op;
 use crate::fileview::FileTarget;
 use crate::style;
 use crate::util;
-use crate::workspace::{Selection, Workspace, WsMessage};
+use crate::workspace::{COMMIT_BODY, COMMIT_SUMMARY, Selection, Workspace, WsMessage};
 
 pub fn details<'a>(ws: &'a Workspace, repo: &'a RepoData, avatars: &'a Avatars) -> Element<'a, WsMessage> {
     let p = style::p();
@@ -232,8 +232,8 @@ fn commit_box(ws: &Workspace) -> Element<'_, WsMessage> {
     container(
         column![
             text(if ws.amend { "ALTERAR ÚLTIMO COMMIT (AMEND)" } else { "MENSAGEM DO COMMIT" }).size(11).color(p.muted),
-            text_input("Resumo (obrigatório)", &ws.commit_summary).on_input(WsMessage::CommitSummary).on_submit(WsMessage::DoCommit).padding(6),
-            text_editor(&ws.commit_body).placeholder("Descrição (opcional)").on_action(WsMessage::CommitBody).height(80).padding(6),
+            text_input("Resumo (obrigatório)", &ws.commit_summary).id(COMMIT_SUMMARY).on_input(WsMessage::CommitSummary).on_submit(WsMessage::DoCommit).padding(6),
+            text_editor(&ws.commit_body).id(COMMIT_BODY).placeholder("Descrição (opcional)").on_action(WsMessage::CommitBody).height(80).padding(6),
             row![
                 checkbox(ws.amend).label("Amend").on_toggle(WsMessage::ToggleAmend).size(14).text_size(13),
                 space::horizontal(),

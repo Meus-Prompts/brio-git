@@ -1,3 +1,6 @@
+// Release builds on Windows are a GUI app: no console window next to it.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod actions;
 mod app;
 mod avatars;
@@ -5,12 +8,14 @@ mod branch_picker;
 mod data;
 mod fileview;
 mod highlight;
+mod history;
 mod icons;
 mod keys;
 mod layout;
 mod menu;
 mod persist;
 mod style;
+mod toasts;
 mod util;
 mod view;
 mod view_details;

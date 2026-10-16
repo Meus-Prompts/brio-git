@@ -3,6 +3,7 @@
 
 use brio_ops::Git;
 use brio_ops::actions::{self as git_actions, InProgress, ResetMode};
+use brio_ops::undo::{self, Move, Snapshot};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckoutTarget {
@@ -55,6 +56,9 @@ pub enum Op {
     /// Opens the hosting site's "new merge request" page.
     MergeRequest { remote: String, source: String, target: String },
 }
+
+/// Refs before and after an operation.
+pub type Change = (Snapshot, Snapshot);
 
 pub fn short(id: &str) -> &str {
     &id[..id.len().min(7)]
@@ -148,6 +152,69 @@ impl Op {
             Op::Rebase(onto) => c(format!("Rebase sobre {onto}?"), "Reescreve os commits da branch atual por cima da outra.".into(), "Fazer rebase"),
             _ => None,
         }
+    }
+
+    /// How undo moves the checked-out branch back, or `None` when the
+    /// operation cannot be undone (remote side, stash, file contents).
+    pub fn undo_move(&self) -> Option<Move> {
+        match self {
+            Op::Commit { .. } => Some(Move::Soft),
+            Op::Checkout(_)
+            | Op::CreateBranch { .. }
+            | Op::RenameBranch { .. }
+            | Op::DeleteBranch { .. }
+            | Op::CreateTag { .. }
+            | Op::DeleteTag(_)
+            | Op::CherryPick(_)
+            | Op::Revert(_)
+            | Op::Reset { .. }
+            | Op::Merge(_)
+            | Op::Rebase(_)
+            | Op::Pull
+            | Op::Continue(_) => Some(Move::Keep),
+            _ => None,
+        }
+    }
+
+    /// Short description for the undo/redo buttons.
+    pub fn history_label(&self) -> String {
+        match self {
+            Op::Commit { message, amend } => {
+                let summary = message.lines().next().unwrap_or_default();
+                let summary: String = if summary.chars().count() > 48 {
+                    summary.chars().take(47).chain(['…']).collect()
+                } else {
+                    summary.to_owned()
+                };
+                format!("{} \"{summary}\"", if *amend { "amend" } else { "commit" })
+            }
+            Op::Checkout(t) => format!("checkout de {}", t.label()),
+            Op::CreateBranch { name, .. } => format!("criar branch {name}"),
+            Op::RenameBranch { old, new } => format!("renomear {old} para {new}"),
+            Op::DeleteBranch { name, .. } => format!("apagar branch {name}"),
+            Op::CreateTag { name, .. } => format!("criar tag {name}"),
+            Op::DeleteTag(name) => format!("apagar tag {name}"),
+            Op::CherryPick(id) => format!("cherry-pick de {}", short(id)),
+            Op::Revert(id) => format!("revert de {}", short(id)),
+            Op::Reset { rev, .. } => format!("reset para {}", short(rev)),
+            Op::Merge(r) => format!("merge de {r}"),
+            Op::Rebase(r) => format!("rebase sobre {r}"),
+            Op::Pull => "pull".into(),
+            Op::Continue(op) => format!("{} concluído", op.label()),
+            other => other.progress(),
+        }
+    }
+
+    /// Runs the operation; for undoable ones, also the refs before and after
+    /// (taken on the same thread, right around it), when something changed.
+    pub fn run_recorded(&self, git: &Git) -> (Result<Option<String>, String>, Option<Change>) {
+        let before = self.undo_move().and_then(|_| undo::snapshot(git).ok());
+        let result = self.run(git);
+        let change = match (&result, before) {
+            (Ok(_), Some(before)) => undo::snapshot(git).ok().filter(|after| *after != before).map(|after| (before, after)),
+            _ => None,
+        };
+        (result, change)
     }
 
     /// Runs the operation. Returns a URL to open, for merge requests.

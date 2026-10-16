@@ -5,13 +5,13 @@ use iced::mouse::Interaction;
 use iced::widget::pane_grid::{self, PaneGrid};
 use iced::widget::{
     button, canvas, center, column, container, mouse_area, opaque, pick_list, row, scrollable, space, stack, text,
-    tooltip,
+    text_editor, tooltip,
 };
 use iced::window::Direction;
-use iced::{Alignment, Color, Element, Fill, Font, Length};
+use iced::{Alignment, Color, Element, Fill, Font, Length, Padding};
 use brio_core::RefKind;
 
-use crate::app::{App, Message, TabId};
+use crate::app::{App, Message, Section, TabId};
 use crate::data::RepoData;
 use crate::icons;
 use crate::layout::PaneKind;
@@ -34,16 +34,6 @@ pub fn view(app: &App) -> Element<'_, Message> {
         if let Some(b) = conflict_banner(tab.id, &tab.ws) {
             layout = layout.push(b);
         }
-        if let Some(b) = banner(tab.ws.error.as_deref(), tab.ws.notice.as_deref()) {
-            layout = layout.push(b.map(move |m| Message::Tab(tab.id, m)));
-        }
-    }
-    if let Some(e) = &app.error {
-        layout = layout.push(
-            container(row![text(e).color(style::p().removed).width(Fill), button("✕").on_press(Message::DismissError).style(button::text)])
-                .padding([6, 12])
-                .style(style::error),
-        );
     }
     layout = layout.push(body(app)).push(status_bar(app));
 
@@ -59,8 +49,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
     {
         layers = layers.push(view_overlay::branch_picker(tab.id, &tab.ws, picker));
     }
-    if app.theme_picker {
-        layers = layers.push(theme_picker());
+    if !app.toasts.is_empty() {
+        layers = layers.push(view_overlay::toasts(&app.toasts));
+    }
+    if let Some(section) = app.settings {
+        layers = layers.push(settings(app, section));
     }
     if let Some(menu) = &app.menu {
         layers = layers.push(view_overlay::context_menu(app, menu));
@@ -116,7 +109,11 @@ fn title_bar(app: &App) -> Element<'_, Message> {
             logo(),
             tabs,
             drag,
-            button(text("◐ Tema").size(13)).on_press(Message::OpenThemes).style(button::text).padding([4, 10]),
+            tip(
+                button(icons::icon(icons::SETTINGS, 15.0)).on_press(Message::OpenSettings).style(style::ghost).padding([5, 8]),
+                "Configurações",
+                tooltip::Position::Bottom,
+            ),
             window_button("—", Message::Minimize),
             window_button(if app.maximized { "❐" } else { "▢" }, Message::ToggleMaximize),
             window_button("✕", Message::Close),
@@ -217,8 +214,33 @@ fn toolbar<'a>(id: TabId, ws: &'a Workspace) -> Element<'a, Message> {
     );
     let chip = tip(chip, "Trocar de branch ou criar uma nova", tooltip::Position::Bottom);
 
+    let mac = cfg!(target_os = "macos");
+    let history = |redo: bool| {
+        let entry = if redo { ws.history.next_redo() } else { ws.history.next_undo() };
+        let glyph = if redo { icons::REDO } else { icons::UNDO };
+        let b = button(icons::icon(glyph, 14.0))
+            .on_press_maybe(entry.filter(|_| idle).map(|_| Message::Tab(id, if redo { WsMessage::Redo } else { WsMessage::Undo })))
+            .style(style::ghost)
+            .padding([5, 7]);
+        let keys = match (redo, mac) {
+            (false, false) => "Ctrl+Z",
+            (false, true) => "⌘Z",
+            (true, false) => "Ctrl+Shift+Z",
+            (true, true) => "⇧⌘Z",
+        };
+        let help = match entry {
+            Some(e) => format!("{}: {} ({keys})", if redo { "Refazer" } else { "Desfazer" }, e.label),
+            None if redo => "Nada para refazer".to_owned(),
+            None => "Nada para desfazer. Commits, checkouts, branches, tags, merge, rebase, reset e pull podem ser desfeitos; push, fetch e stash não.".to_owned(),
+        };
+        tip(b, help, tooltip::Position::Bottom)
+    };
+
     container(
         row![
+            history(false),
+            history(true),
+            divider(),
             chip,
             refresh,
             divider(),
@@ -274,7 +296,14 @@ fn status_bar(app: &App) -> Element<'_, Message> {
         None => space().into(),
     };
 
-    container(row![toggles, space::horizontal(), status, upstream].spacing(14).align_y(Alignment::Center))
+    let version = if util::VERSION == "dev" { "dev".to_owned() } else { format!("v{}", util::VERSION) };
+    let build = match util::COMMIT {
+        Some(c) => format!("brio-git {version} · commit {}", &c[..c.len().min(7)]),
+        None => format!("brio-git {version} · build local"),
+    };
+    let version = tip(text(version).size(11).color(p.muted.scale_alpha(0.8)), build, tooltip::Position::Top);
+
+    container(row![toggles, space::horizontal(), status, upstream, version].spacing(14).align_y(Alignment::Center))
         .padding([1, 8])
         .height(26)
         .align_y(Alignment::Center)
@@ -316,21 +345,6 @@ fn conflict_banner(id: TabId, ws: &Workspace) -> Option<Element<'_, Message>> {
         })
         .into(),
     )
-}
-
-fn banner<'a>(error: Option<&'a str>, notice: Option<&'a str>) -> Option<Element<'a, WsMessage>> {
-    let (msg, is_error) = match (error, notice) {
-        (Some(e), _) => (e, true),
-        (None, Some(n)) => (n, false),
-        (None, None) => return None,
-    };
-    let content = row![
-        text(msg).color(if is_error { style::p().removed } else { style::p().text }).width(Fill),
-        button("✕").on_press(WsMessage::DismissError).style(button::text),
-    ]
-    .align_y(Alignment::Center);
-    let c = container(content).padding([6, 12]).width(Fill);
-    Some(if is_error { c.style(style::error) } else { c.style(style::bar) }.into())
 }
 
 fn body(app: &App) -> Element<'_, Message> {
@@ -605,36 +619,96 @@ fn session_panel(ws: &Workspace) -> Element<'_, WsMessage> {
     column![bar, terminal].spacing(8).padding(8).into()
 }
 
-/// Modal grid of theme cards, each with a miniature of the app in its colors.
-fn theme_picker<'a>() -> Element<'a, Message> {
-    let current = style::p().name;
-    let mut grid = column![].spacing(12);
-    for chunk in style::THEMES.chunks(4) {
-        let mut line = row![].spacing(12);
-        for t in chunk {
-            line = line.push(theme_card(t, t.name == current));
+/// Settings modal: a section list on the left, the section on the right.
+fn settings(app: &App, section: Section) -> Element<'_, Message> {
+    let p = style::p();
+    let entry = |s: Section, glyph: char, label: &'static str| {
+        let selected = s == section;
+        button(row![icons::icon(glyph, 14.0), text(label).size(13)].spacing(8).align_y(Alignment::Center))
+            .on_press(Message::ShowSection(s))
+            .style(move |t: &iced::Theme, st| style::list_item(t, st, selected))
+            .padding([7, 10])
+            .width(Fill)
+    };
+    let nav = column![
+        entry(Section::Appearance, icons::PALETTE, "Aparência"),
+        entry(Section::CommitAi, icons::SPARKLES, "Commit com IA"),
+    ]
+    .spacing(2)
+    .width(180);
+
+    let content: Element<_> = match section {
+        Section::Appearance => {
+            let current = p.name;
+            let mut grid = column![].spacing(12);
+            for chunk in style::THEMES.chunks(2) {
+                let mut line = row![].spacing(12);
+                for t in chunk {
+                    line = line.push(theme_card(t, t.name == current));
+                }
+                if chunk.len() == 1 {
+                    line = line.push(space().width(Fill));
+                }
+                grid = grid.push(line);
+            }
+            // Thin bar against the modal edge, beside (not over) the cards.
+            let bar = scrollable::Scrollbar::new().width(6).scroller_width(6).margin(0).spacing(10);
+            column![
+                text("Tema").size(15),
+                scrollable(grid).direction(scrollable::Direction::Vertical(bar)).height(Fill),
+            ]
+            .spacing(12)
+            .into()
         }
-        grid = grid.push(line);
-    }
+        Section::CommitAi => {
+            let custom = !app.commit_prompt.is_empty();
+            let reset = button(row![icons::icon(icons::RESET, 12.0), text("Restaurar padrão").size(12)].spacing(6).align_y(Alignment::Center))
+                .on_press_maybe(custom.then_some(Message::ResetPrompt))
+                .style(style::ghost)
+                .padding([4, 8]);
+            column![
+                row![text("Prompt da mensagem de commit").size(15), space::horizontal(), reset].align_y(Alignment::Center),
+                text("Instrução enviada à IA escolhida na Sessão de IA ao clicar em gerar mensagem. O diff em stage é anexado depois dela automaticamente.")
+                    .size(12)
+                    .color(p.muted),
+                text_editor(&app.prompt_editor)
+                    .on_action(Message::EditPrompt)
+                    .size(13)
+                    .padding(10)
+                    .height(Fill),
+                text(if custom { "Prompt personalizado, salvo para todas as abas." } else { "Usando o prompt padrão." })
+                    .size(11)
+                    .color(p.muted),
+            ]
+            .spacing(10)
+            .padding(Padding { right: 10.0, ..Padding::ZERO })
+            .into()
+        }
+    };
 
     let dialog = container(
         column![
             row![
-                text("Tema").size(18).width(Fill),
-                button(text("✕").size(14)).on_press(Message::CloseThemes).style(button::text),
+                icons::icon(icons::SETTINGS, 16.0),
+                text("Configurações").size(18).width(Fill),
+                button(icons::icon(icons::CLOSE, 14.0)).on_press(Message::CloseSettings).style(style::ghost).padding([4, 6]),
             ]
+            .spacing(10)
+            .padding(Padding { right: 10.0, ..Padding::ZERO })
             .align_y(Alignment::Center),
-            scrollable(grid),
+            container(space()).width(Fill).height(1).style(style::divider),
+            row![nav, container(space()).width(1).height(Fill).style(style::divider), content].spacing(16).height(Fill),
         ]
         .spacing(14),
     )
-    .padding(18)
-    .max_width(640)
-    .max_height(560)
+    // Narrow on the right so the theme list scrollbar sits near the edge.
+    .padding(Padding { top: 18.0, right: 8.0, bottom: 18.0, left: 18.0 })
+    .width(760)
+    .height(520)
     .style(style::modal);
 
     let backdrop = mouse_area(container(space()).width(Fill).height(Fill).style(style::backdrop))
-        .on_press(Message::CloseThemes);
+        .on_press(Message::CloseSettings);
     stack![backdrop, center(opaque(dialog))].into()
 }
 
@@ -654,8 +728,8 @@ fn theme_card<'a>(t: &'static style::Palette, selected: bool) -> Element<'a, Mes
             .padding([10, 12]),
         ],
     )
-    .width(124)
-    .height(66)
+    .width(Fill)
+    .height(80)
     .clip(true)
     .style(move |_: &iced::Theme| container::Style {
         background: Some(t.bg.into()),
@@ -667,6 +741,7 @@ fn theme_card<'a>(t: &'static style::Palette, selected: bool) -> Element<'a, Mes
     let label = text(t.name).size(13).color(if selected { p.accent } else { p.text });
     button(column![preview, label].spacing(8).align_x(Alignment::Center))
         .on_press(Message::SetTheme(t.name))
+        .width(Fill)
         .padding(8)
         .style(move |_: &iced::Theme, status| {
             let hovered = matches!(status, button::Status::Hovered);

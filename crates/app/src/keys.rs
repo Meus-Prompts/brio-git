@@ -111,6 +111,18 @@ pub fn paste(text: &str, bracketed: bool) -> Vec<u8> {
     }
 }
 
+/// Ctrl+Z (undo), Ctrl+Shift+Z or Ctrl+Y (redo); Cmd on macOS. `Some(redo)`.
+pub fn history_shortcut(key: &Key, mods: Modifiers) -> Option<bool> {
+    if !mods.command() {
+        return None;
+    }
+    match key.as_ref() {
+        Key::Character(c) if c.eq_ignore_ascii_case("z") => Some(mods.shift()),
+        Key::Character(c) if c.eq_ignore_ascii_case("y") && !mods.shift() => Some(true),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,5 +164,15 @@ mod tests {
         assert!(!is_paste(&ch("v"), Modifiers::CTRL));
         assert_eq!(paste("a\nb", false), b"a\rb");
         assert_eq!(paste("x\x1b[201~y", true), b"\x1b[200~xy\x1b[201~");
+    }
+
+    #[test]
+    fn undo_redo_shortcuts() {
+        let cmd = if cfg!(target_os = "macos") { Modifiers::LOGO } else { Modifiers::CTRL };
+        assert_eq!(history_shortcut(&ch("z"), cmd), Some(false));
+        assert_eq!(history_shortcut(&ch("Z"), cmd | Modifiers::SHIFT), Some(true));
+        assert_eq!(history_shortcut(&ch("y"), cmd), Some(true));
+        assert_eq!(history_shortcut(&ch("z"), Modifiers::empty()), None);
+        assert_eq!(history_shortcut(&ch("x"), cmd), None);
     }
 }

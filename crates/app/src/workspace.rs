@@ -12,12 +12,15 @@ use iced::widget::scrollable::AbsoluteOffset;
 use iced::Task;
 use iced::widget::text_editor;
 use brio_core::RefKind;
+use brio_ops::actions::ResetMode;
+use brio_ops::undo::{self, Snapshot};
 use brio_session::{TermEvent, TermSnapshot, Terminal, Tool, WatchHandle};
 
 use crate::actions::{CheckoutTarget, Op};
 use crate::branch_picker::{self, BranchPicker, Choice};
 use crate::data::RepoData;
 use crate::menu::Target;
+use crate::history::{self, History};
 use crate::fileview::{self, Details, FileTarget, FileView, Loaded, Mode};
 use crate::util::{self, blocking};
 use crate::widgets::graph;
@@ -57,6 +60,8 @@ pub struct Dialog {
 }
 
 pub const DIALOG_INPUT: &str = "dialog-input";
+pub const COMMIT_SUMMARY: &str = "commit-summary";
+pub const COMMIT_BODY: &str = "commit-body";
 
 /// The AI session running in the embedded terminal.
 pub struct Session {
@@ -98,6 +103,8 @@ pub struct Workspace {
     pub branch_picker: Option<BranchPicker>,
     /// Label of the git operation running in the background.
     pub busy: Option<String>,
+    /// Local operations that can be undone and redone.
+    pub history: History,
 
     // Commit box.
     pub commit_summary: String,
@@ -147,7 +154,13 @@ pub enum WsMessage {
     /// Right-click; handled by the app, which owns the menu overlay.
     OpenMenu(Target),
     Request(Op),
-    OpDone(Op, Result<Option<String>, String>),
+    /// The refs before and after are there when the operation can be undone.
+    OpDone(Op, Result<Option<String>, String>, Option<Box<(Snapshot, Snapshot)>>),
+    Undo,
+    Redo,
+    /// Ctrl+Z / Ctrl+Shift+Z, once it is known whether a commit field had the focus.
+    HistoryShortcut { redo: bool, typing: bool },
+    HistoryDone { redo: bool, result: Result<(), String> },
     Checkout(CheckoutTarget),
     CheckoutCommit(String),
     CopyText(String),
@@ -166,7 +179,9 @@ pub enum WsMessage {
     CommitSummary(String),
     CommitBody(text_editor::Action),
     ToggleAmend(bool),
+    /// The app answers this with [`WsMessage::GenerateWith`] and the configured prompt.
     GenerateMessage,
+    GenerateWith(String),
     MessageGenerated(Result<String, String>),
     DoCommit,
     StageAll,
@@ -193,7 +208,6 @@ pub enum WsMessage {
     BranchSubmit,
     PickBranch(Choice),
 
-    DismissError,
 }
 
 impl Workspace {
@@ -220,6 +234,7 @@ impl Workspace {
             pinned,
             dialog: None,
             branch_picker: None,
+            history: History::default(),
             busy: None,
             commit_summary: String::new(),
             commit_body: text_editor::Content::new(),
@@ -488,7 +503,14 @@ impl Workspace {
             }
             WsMessage::Key(key, mods, text) => {
                 let Some(term) = self.terminal.as_ref().filter(|_| self.term_focused) else {
-                    return Task::none();
+                    return match keys::history_shortcut(&key, mods) {
+                        // Only when no commit field is being typed in.
+                        Some(redo) => operation::is_focused(COMMIT_SUMMARY).then(move |summary| {
+                            operation::is_focused(COMMIT_BODY)
+                                .map(move |body| WsMessage::HistoryShortcut { redo, typing: summary || body })
+                        }),
+                        None => Task::none(),
+                    };
                 };
                 if keys::is_paste(&key, mods) {
                     return iced::clipboard::read().map(WsMessage::Paste);
@@ -507,8 +529,22 @@ impl Workspace {
             // The app intercepts this to show the menu.
             WsMessage::OpenMenu(_) => Task::none(),
             WsMessage::Request(op) => self.request(op),
-            WsMessage::OpDone(op, result) => {
+            WsMessage::OpDone(op, result, change) => {
                 self.busy = None;
+                if let (Some(change), Some(mode)) = (change, op.undo_move()) {
+                    let (before, after) = *change;
+                    self.history.record(history::Entry {
+                        label: op.history_label(),
+                        before,
+                        after,
+                        mode,
+                        message: match &op {
+                            Op::Commit { message, .. } => Some(message.clone()),
+                            _ => None,
+                        },
+                        hard_reset: matches!(op, Op::Reset { mode: ResetMode::Hard, .. }),
+                    });
+                }
                 match result {
                     Ok(url) => {
                         if let Some(url) = url {
@@ -523,6 +559,33 @@ impl Workspace {
                             self.commit_summary.clear();
                             self.commit_body = text_editor::Content::new();
                             self.amend = false;
+                        }
+                    }
+                    Err(e) => self.error = Some(e),
+                }
+                self.request_reload()
+            }
+            WsMessage::Undo => self.run_history(false),
+            WsMessage::Redo => self.run_history(true),
+            WsMessage::HistoryShortcut { redo, typing } => {
+                if typing { Task::none() } else { self.run_history(redo) }
+            }
+            WsMessage::HistoryDone { redo, result } => {
+                self.busy = None;
+                match result {
+                    Ok(()) => {
+                        let entry = if redo { self.history.next_redo() } else { self.history.next_undo() }.cloned();
+                        if redo { self.history.redone() } else { self.history.undone() }
+                        if let Some(e) = entry {
+                            let mut msg = format!("{}: {}.", if redo { "Refeito" } else { "Desfeito" }, e.label);
+                            if !redo && e.hard_reset {
+                                msg.push_str(" As alterações descartadas pelo reset --hard não voltam.");
+                            }
+                            if !redo && let Some(m) = &e.message {
+                                // The undone commit's changes are back in stage; so is its message.
+                                self.set_commit_message(m);
+                            }
+                            self.notice = Some(msg);
                         }
                     }
                     Err(e) => self.error = Some(e),
@@ -616,7 +679,8 @@ impl Workspace {
                 }
                 Task::none()
             }
-            WsMessage::GenerateMessage => self.generate_message(),
+            WsMessage::GenerateMessage => self.generate_message(brio_session::ai::PROMPT.to_owned()),
+            WsMessage::GenerateWith(prompt) => self.generate_message(prompt),
             WsMessage::MessageGenerated(result) => {
                 self.generating = false;
                 match result {
@@ -642,12 +706,6 @@ impl Workspace {
             WsMessage::UnstageAll => {
                 let paths = self.paths(|c| c.staged);
                 if paths.is_empty() { Task::none() } else { self.request(Op::Unstage(paths)) }
-            }
-
-            WsMessage::DismissError => {
-                self.error = None;
-                self.notice = None;
-                Task::none()
             }
         }
     }
@@ -792,9 +850,43 @@ impl Workspace {
         self.busy = Some(op.progress());
         let git = repo.git();
         let job = op.clone();
-        Task::perform(blocking(move || Ok(job.run(&git))), move |r: Result<_, String>| {
-            WsMessage::OpDone(op.clone(), r.and_then(|inner| inner))
+        Task::perform(blocking(move || Ok(job.run_recorded(&git))), move |r: Result<_, String>| match r {
+            Ok((result, change)) => WsMessage::OpDone(op.clone(), result, change.map(Box::new)),
+            Err(e) => WsMessage::OpDone(op.clone(), Err(e), None),
         })
+    }
+
+    /// Undoes the last operation, or redoes the last undone one, if the
+    /// repository is still exactly as that operation left it.
+    fn run_history(&mut self, redo: bool) -> Task<WsMessage> {
+        let Some(repo) = &self.repo else { return Task::none() };
+        if let Some(busy) = &self.busy {
+            self.notice = Some(format!("Aguarde: {busy}"));
+            return Task::none();
+        }
+        let entry = if redo { self.history.next_redo() } else { self.history.next_undo() };
+        let Some(entry) = entry.cloned() else {
+            self.notice = Some(if redo { "Nada para refazer." } else { "Nada para desfazer." }.into());
+            return Task::none();
+        };
+        let (expected, target) = if redo { (entry.before, entry.after) } else { (entry.after, entry.before) };
+        self.busy = Some(format!("{} {}…", if redo { "Refazendo" } else { "Desfazendo" }, entry.label));
+        let git = repo.git();
+        let label = entry.label.clone();
+        let mode = entry.mode;
+        Task::perform(
+            blocking(move || {
+                let now = undo::snapshot(&git).map_err(|e| e.to_string())?;
+                if now != expected {
+                    return Err(format!(
+                        "Não dá para {} \"{label}\": o repositório mudou depois disso (outro commit, checkout ou branch).",
+                        if redo { "refazer" } else { "desfazer" }
+                    ));
+                }
+                undo::restore(&git, &target, mode).map_err(|e| e.to_string())
+            }),
+            move |result| WsMessage::HistoryDone { redo, result },
+        )
     }
 
     fn confirm_dialog(&mut self) -> Task<WsMessage> {
@@ -841,7 +933,7 @@ impl Workspace {
         self.request(Op::Checkout(target))
     }
 
-    fn generate_message(&mut self) -> Task<WsMessage> {
+    fn generate_message(&mut self, prompt: String) -> Task<WsMessage> {
         let Some(repo) = &self.repo else { return Task::none() };
         let Some(tool) = self.tools.iter().find(|t| Some(&t.name) == self.tool.as_ref()).cloned() else {
             self.error = Some("Escolha uma IA na Sessão de IA.".into());
@@ -861,7 +953,7 @@ impl Workspace {
         Task::perform(
             blocking(move || {
                 let diff = brio_ops::actions::staged_diff(&git).map_err(|e| e.to_string())?;
-                brio_session::ai::commit_message(&tool, &cwd, &diff)
+                brio_session::ai::commit_message(&tool, &cwd, &diff, &prompt)
             }),
             WsMessage::MessageGenerated,
         )

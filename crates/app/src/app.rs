@@ -4,9 +4,10 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use iced::keyboard::{Key, Modifiers};
-use iced::widget::pane_grid;
+use iced::widget::{pane_grid, text_editor};
 use iced::{Point, Size, Subscription, Task, Theme, event, keyboard, window};
 use brio_session::Tool;
 
@@ -15,6 +16,7 @@ use crate::layout::{Layout, PaneKind};
 use crate::menu::{self, MenuItem};
 use crate::persist::{self, Saved};
 use crate::style;
+use crate::toasts::{self, Toasts};
 use crate::util::blocking;
 use crate::workspace::{Workspace, WsMessage};
 
@@ -41,7 +43,12 @@ pub struct App {
     pub confirm_close: Option<TabId>,
     pub error: Option<String>,
     pub theme: Theme,
-    pub theme_picker: bool,
+    /// Open settings modal and the section it shows.
+    pub settings: Option<Section>,
+    /// Instruction sent to the AI before the staged diff; empty means [`brio_session::ai::PROMPT`].
+    pub commit_prompt: String,
+    pub prompt_editor: text_editor::Content,
+    pub toasts: Toasts,
     pub avatars: Avatars,
 
     /// Open context menu, if any.
@@ -52,6 +59,12 @@ pub struct App {
     pub window_size: Size,
     /// Pinned branch per repository work tree, as saved.
     pinned: HashMap<PathBuf, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Section {
+    Appearance,
+    CommitAi,
 }
 
 pub struct ContextMenu {
@@ -84,9 +97,14 @@ pub enum Message {
     ToggleMaximize,
     Close,
 
-    OpenThemes,
-    CloseThemes,
+    OpenSettings,
+    CloseSettings,
+    ShowSection(Section),
     SetTheme(&'static str),
+    EditPrompt(text_editor::Action),
+    ResetPrompt,
+    DismissToast(u64),
+    Tick(Instant),
     MenuPick(WsMessage),
     MenuHover(Option<usize>),
     CloseMenu,
@@ -95,7 +113,6 @@ pub enum Message {
 
     Key(Key, Modifiers, Option<String>),
     EscapeInField,
-    DismissError,
 }
 
 impl App {
@@ -130,7 +147,10 @@ impl App {
             confirm_close: None,
             error: None,
             theme: style::p().iced_theme(),
-            theme_picker: false,
+            settings: None,
+            prompt_editor: text_editor::Content::with_text(effective_prompt(&saved.commit_prompt)),
+            commit_prompt: saved.commit_prompt.clone(),
+            toasts: Toasts::default(),
             avatars: Avatars::default(),
             menu: None,
             cursor: Cell::new(Point::ORIGIN),
@@ -178,12 +198,43 @@ impl App {
             _ => None,
         });
         let close = window::close_requests().map(|_| Message::Close);
+        let tick = if self.toasts.is_empty() {
+            Subscription::none()
+        } else {
+            iced::time::every(Duration::from_millis(250)).map(Message::Tick)
+        };
         let resize = window::resize_events().map(|(_, size)| Message::WindowResized(size));
-        Subscription::batch([keys, close, resize])
+        Subscription::batch([keys, close, resize, tick])
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.handle(message);
+        self.collect_messages();
+        task
+    }
+
+    /// Moves errors and notices left by the tabs (and the app) into toasts.
+    fn collect_messages(&mut self) {
+        let now = Instant::now();
+        for (i, tab) in self.tabs.iter_mut().enumerate() {
+            let source = (i != self.active).then(|| tab.ws.name());
+            if let Some(e) = tab.ws.error.take() {
+                self.toasts.push(toasts::Kind::Error, e, source.clone(), now);
+            }
+            if let Some(n) = tab.ws.notice.take() {
+                self.toasts.push(toasts::Kind::Info, n, source, now);
+            }
+        }
+        if let Some(e) = self.error.take() {
+            self.toasts.push(toasts::Kind::Error, e, None, now);
+        }
+    }
+
+    fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::Tab(id, WsMessage::GenerateMessage) => {
+                self.forward(id, WsMessage::GenerateWith(effective_prompt(&self.commit_prompt).to_owned()))
+            }
             Message::Tab(id, WsMessage::OpenMenu(target)) => {
                 let Some(ws) = self.tabs.iter().find(|t| t.id == id).map(|t| &t.ws) else { return Task::none() };
                 let Some(repo) = &ws.repo else { return Task::none() };
@@ -316,12 +367,38 @@ impl App {
                 iced::exit()
             }
 
-            Message::OpenThemes => {
-                self.theme_picker = true;
+            Message::OpenSettings => {
+                self.settings = Some(Section::Appearance);
                 Task::none()
             }
-            Message::CloseThemes => {
-                self.theme_picker = false;
+            Message::CloseSettings => {
+                self.settings = None;
+                self.save();
+                Task::none()
+            }
+            Message::ShowSection(section) => {
+                self.settings = Some(section);
+                Task::none()
+            }
+            Message::EditPrompt(action) => {
+                self.prompt_editor.perform(action);
+                let text = self.prompt_editor.text();
+                let text = text.trim();
+                // Saving the default text verbatim would freeze it; keep "default" as empty.
+                self.commit_prompt = if text == brio_session::ai::PROMPT { String::new() } else { text.to_owned() };
+                Task::none()
+            }
+            Message::ResetPrompt => {
+                self.commit_prompt.clear();
+                self.prompt_editor = text_editor::Content::with_text(brio_session::ai::PROMPT);
+                Task::none()
+            }
+            Message::DismissToast(id) => {
+                self.toasts.dismiss(id);
+                Task::none()
+            }
+            Message::Tick(now) => {
+                self.toasts.expire(now);
                 Task::none()
             }
             Message::SetTheme(name) => {
@@ -350,12 +427,13 @@ impl App {
                 }
                 Task::none()
             }
-            Message::Key(key, _, _) if self.theme_picker => {
+            Message::Key(key, _, _) if self.settings.is_some() => {
                 if key == Key::Named(keyboard::key::Named::Escape) {
-                    self.theme_picker = false;
+                    return self.handle(Message::CloseSettings);
                 }
                 Task::none()
             }
+            Message::EscapeInField if self.settings.is_some() => self.handle(Message::CloseSettings),
             Message::EscapeInField => match self.active_id() {
                 Some(id) => self.forward(id, WsMessage::CloseOverlays),
                 None => Task::none(),
@@ -364,10 +442,6 @@ impl App {
                 Some(id) => self.forward(id, WsMessage::Key(key, mods, text)),
                 None => Task::none(),
             },
-            Message::DismissError => {
-                self.error = None;
-                Task::none()
-            }
         }
     }
 
@@ -437,11 +511,17 @@ impl App {
             layout: self.layout.clone(),
             theme: style::p().name.to_owned(),
             pinned,
+            commit_prompt: self.commit_prompt.clone(),
         };
         if let Err(e) = persist::save(file, &saved) {
             self.error = Some(format!("Não foi possível salvar o estado: {e}"));
         }
     }
+}
+
+/// The prompt in use: the saved one, or the built-in default when none was set.
+pub fn effective_prompt(saved: &str) -> &str {
+    if saved.trim().is_empty() { brio_session::ai::PROMPT } else { saved }
 }
 
 fn same_dir(a: &Path, b: &Path) -> bool {

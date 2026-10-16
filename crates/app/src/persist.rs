@@ -16,11 +16,20 @@ pub struct Saved {
     pub theme: String,
     /// Work tree path -> branch pinned to the left of the graph.
     pub pinned: HashMap<String, String>,
+    /// Instruction for AI commit messages; empty means the built-in default.
+    pub commit_prompt: String,
 }
 
 impl Default for Saved {
     fn default() -> Self {
-        Self { tabs: Vec::new(), active: 0, layout: Layout::default(), theme: "Dark".into(), pinned: HashMap::new() }
+        Self {
+            tabs: Vec::new(),
+            active: 0,
+            layout: Layout::default(),
+            theme: "Dark".into(),
+            pinned: HashMap::new(),
+            commit_prompt: String::new(),
+        }
     }
 }
 
@@ -60,7 +69,14 @@ mod tests {
         let mut layout = Layout::default();
         layout.set_visible(PaneKind::Sidebar, false);
         let pinned = HashMap::from([("/a".to_owned(), "main".to_owned())]);
-        let saved = Saved { tabs: vec!["/a".into(), "/b".into()], active: 1, layout, theme: "Nord".into(), pinned };
+        let saved = Saved {
+            tabs: vec!["/a".into(), "/b".into()],
+            active: 1,
+            layout,
+            theme: "Nord".into(),
+            pinned,
+            commit_prompt: "Só o título, em inglês.".into(),
+        };
         save(&path, &saved).unwrap();
         assert_eq!(load(&path), saved);
 
@@ -77,5 +93,6 @@ mod tests {
         assert_eq!(saved.tabs, vec![PathBuf::from("/x")]);
         assert_eq!(saved.layout, Layout::default());
         assert_eq!(saved.theme, "Dark");
+        assert_eq!(saved.commit_prompt, "", "no prompt saved: the default is used");
     }
 }

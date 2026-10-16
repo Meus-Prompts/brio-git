@@ -33,6 +33,13 @@ pub const SEARCH: char = '\u{e155}';
 pub const BRANCH_PLUS: char = '\u{e1f4}';
 pub const CLOUD: char = '\u{e08c}';
 pub const GRIP: char = '\u{e0ed}';
+pub const SETTINGS: char = '\u{e158}';
+pub const PALETTE: char = '\u{e1dd}';
+pub const RESET: char = '\u{e14c}';
+pub const SUCCESS: char = '\u{e226}';
+pub const ALERT: char = '\u{e07b}';
+pub const UNDO: char = '\u{e2a1}';
+pub const REDO: char = '\u{e2a0}';
 
 /// An icon glyph at `size` pixels.
 pub fn icon<'a>(glyph: char, size: f32) -> Text<'a> {
