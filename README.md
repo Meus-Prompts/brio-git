@@ -5,6 +5,7 @@ Cliente Git desktop (Rust + [iced](https://iced.rs)) focado em acompanhar uma IA
 - **Grafo de commits** com avatar do autor em cada nó (Gravatar, ou iniciais quando não houver foto; passe o mouse para ver nome e e-mail), branches, remotos, tags e o hash (clique para copiar). A branch atual fica em destaque.
 - **Operações Git** por menu de contexto (botão direito no commit, na branch, na tag ou no stash): checkout (duplo clique no grafo também faz checkout), criar/renomear/apagar branch (local e no remoto), criar/apagar/enviar tag, cherry-pick, revert, reset soft/mixed/hard, merge, rebase, comparar revisões, abrir merge request (GitHub, GitLab, Bitbucket, Azure DevOps) e fixar uma branch à esquerda do grafo. Operações destrutivas pedem confirmação; checkout com alterações pendentes oferece guardar no stash.
 - **Trocar ou criar branch** clicando no nome da branch atual na barra: busca por nome, ↑↓ e Enter; se o nome não existir, cria a branch a partir de HEAD.
+- **Desfazer / Refazer** (↶ ↷ na barra, `Ctrl+Z` / `Ctrl+Shift+Z`, `⌘Z` no macOS): volta commit (as alterações voltam para o stage, com a mensagem), amend, checkout, criar/renomear/apagar branch e tag, merge, rebase, cherry-pick, revert, reset e pull. Push, fetch e stash não são desfeitos. Se o repositório mudou por fora depois da operação, o app avisa e não mexe em nada.
 - **Fetch / Pull / Push** na barra (passe o mouse para ver o que cada botão faz), com commits à frente/atrás do upstream; merge/rebase com conflito mostram uma faixa com Continuar e Abortar.
 - **Commit**: arquivos fora do stage e em stage (stage, unstage, descartar), mensagem com resumo e descrição, **amend** e **mensagem gerada pela IA** escolhida (`claude`, `codex`, `gemini`…) a partir do diff em stage.
 - **Detalhes do commit**: mensagem completa, autor, data e arquivos alterados em lista ou árvore de pastas.
@@ -15,7 +16,8 @@ Cliente Git desktop (Rust + [iced](https://iced.rs)) focado em acompanhar uma IA
 - **Layout livre**: arraste qualquer painel pela barra de título e solte no centro de outro (troca os dois) ou numa borda (divide aquele espaço), montando o arranjo que quiser: 3 linhas, 2 linhas × 3 colunas… As divisórias redimensionam, e o arranjo fica salvo. Os ícones no rodapé (estilo Zed/VS Code) abrem e fecham cada painel, e o último ícone restaura o layout padrão. Seções de branches/remotos/tags recolhem com um clique.
 - **Reflog**: painel com os últimos movimentos do HEAD (commit, checkout, reset, rebase…). Clique mostra o commit, mesmo os que nenhuma branch alcança mais; o botão direito abre o menu de commit (criar branch aqui, checkout, reset…) para recuperar trabalho perdido.
 - **Alterações não commitadas** aparecem como uma linha tracejada no topo do grafo, ligada ao HEAD; clique para ver o working tree, botão direito para stage, stash ou descartar.
-- **Temas**: 13 temas (Dark, Tokyo Night, Dracula, One Dark, Nord, Gruvbox, Solarized, Catppuccin, Rosé Pine…) em `◐ Tema`.
+- **Configurações** (engrenagem na barra de título): 13 temas (Dark, Tokyo Night, Dracula, One Dark, Nord, Gruvbox, Solarized, Catppuccin, Rosé Pine…) e o **prompt** usado para gerar a mensagem de commit com IA (o diff em stage é anexado depois dele; "Restaurar padrão" volta ao original).
+- **Avisos em toasts** no canto inferior direito: sucesso some em 4 s, erro em 10 s, ou feche no ✕.
 
 ## Rodar
 
@@ -62,6 +64,25 @@ cargo install --path crates/app --locked
 brio-git /caminho/do/repo
 ```
 
+## Downloads
+
+Cada push na `main` gera uma versão nova em **Releases** no GitHub, com:
+
+| sistema | arquivo |
+|---|---|
+| Linux | `brio-git-<versão>-x86_64.AppImage` ou `brio-git-<versão>-linux-x86_64.tar.gz` |
+| macOS (Apple Silicon e Intel) | `brio-git-<versão>-macos-universal.zip` com `brio-git.app` |
+| Windows | `brio-git-<versão>-windows-x86_64.zip` com `brio-git.exe` |
+
+Os binários de macOS e Windows não são assinados: no macOS, abra a primeira vez com botão direito > Abrir; no Windows, o SmartScreen pode pedir "Mais informações > Executar assim mesmo". A versão do build aparece no canto direito do rodapé (`dev` em builds locais).
+
+## Pipeline e versões
+
+- `.github/workflows/ci.yml`: em pull requests e outras branches, clippy e testes no Linux e build no macOS e no Windows.
+- `.github/workflows/release.yml`: em push na `main` (ou `master`), calcula a versão, roda clippy e testes, compila os três sistemas e publica o release com a tag `vX.Y.Z`.
+
+A versão vem dos commits desde a última tag, no padrão [Conventional Commits](https://www.conventionalcommits.org/pt-br/): `feat:` sobe o minor (1.4.2 → 1.5.0), `tipo!:` ou `BREAKING CHANGE:` sobe o major (→ 2.0.0) e o resto (`fix:`, `chore:`…) sobe o patch (→ 1.4.3). Sem tag ainda, a primeira é `0.1.0`. A tag é a fonte da verdade: o pipeline não faz commit de volta e o `version` do `Cargo.toml` só é trocado durante o build. Para ver qual seria a próxima versão: `scripts/next-version.sh` (e `--test` roda o autoteste).
+
 ## AppImage (Linux)
 
 ```sh
@@ -70,6 +91,10 @@ packaging/appimage/build.sh --container  # compila no Debian bookworm via podman
 ```
 
 O arquivo sai em `target/appimage/brio-git-<versão>-x86_64.AppImage`. O script baixa o `appimagetool` oficial para `target/appimage-tools` na primeira vez.
+
+## App do macOS
+
+Num Mac com Xcode e `brew install librsvg`: `packaging/macos/bundle.sh` gera `target/macos/brio-git-<versão>-macos-universal.zip` (Apple Silicon + Intel).
 
 ## Estrutura
 
