@@ -1,21 +1,22 @@
-//! One open repository (a tab): its data, live watcher, AI session and
-//! checkpoint timeline. Views live in `view.rs`.
+//! One open repository (a tab): its data, live watcher and AI session.
+//! Views live in `view.rs`.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
 
 use iced::keyboard::{Key, Modifiers};
 use iced::widget::canvas::Cache;
 use iced::widget::operation;
 use iced::widget::scrollable::AbsoluteOffset;
 use iced::Task;
-use lazygit_core::RefKind;
-use lazygit_ops::checkpoint::{self, Checkpoint};
-use lazygit_session::{ChangeBatch, CheckpointScheduler, TermEvent, TermSnapshot, Terminal, Tool, WatchHandle};
+use iced::widget::text_editor;
+use brio_core::RefKind;
+use brio_session::{TermEvent, TermSnapshot, Terminal, Tool, WatchHandle};
 
+use crate::actions::{CheckoutTarget, Op};
 use crate::data::RepoData;
+use crate::menu::Target;
 use crate::fileview::{self, Details, FileTarget, FileView, Loaded, Mode};
 use crate::util::{self, blocking};
 use crate::widgets::graph::ROW_H;
@@ -29,14 +30,37 @@ pub enum Selection {
     /// Live changes in the working tree.
     Worktree,
     Commit(String),
-    Checkpoint(u32),
+    /// Two revisions side by side; `to: None` is the working tree.
+    Compare { from: String, to: Option<String> },
 }
+
+/// A modal asking for a name or a confirmation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DialogKind {
+    CreateBranch { at: String },
+    CreateTag { at: String },
+    RenameBranch { old: String },
+    Confirm(Op),
+    /// Checkout blocked by local changes: stash them or cancel.
+    DirtyCheckout(CheckoutTarget),
+}
+
+pub struct Dialog {
+    pub kind: DialogKind,
+    pub input: String,
+    /// Tag message.
+    pub input2: String,
+    /// "Checkout after creating".
+    pub check: bool,
+    pub error: Option<String>,
+}
+
+pub const DIALOG_INPUT: &str = "dialog-input";
 
 /// The AI session running in the embedded terminal.
 pub struct Session {
     pub tool: String,
     pub running: bool,
-    pub scheduler: CheckpointScheduler,
     pub exit_code: Option<u32>,
 }
 
@@ -52,7 +76,7 @@ pub struct Workspace {
     pub graph_cache: Cache,
 
     pub selection: Selection,
-    /// Commit or checkpoint shown in the details panel.
+    /// Commit shown in the details panel.
     pub details: Option<Result<Arc<Details>, String>>,
     details_token: u64,
     /// File open in the viewer (replaces the graph while open).
@@ -64,6 +88,19 @@ pub struct Workspace {
     pub changes_only: bool,
     pub tree_view: bool,
     pub collapsed_dirs: HashSet<String>,
+    pub collapsed_stash: bool,
+
+    /// Local branch kept in the first lane of the graph.
+    pub pinned: Option<String>,
+    pub dialog: Option<Dialog>,
+    /// Label of the git operation running in the background.
+    pub busy: Option<String>,
+
+    // Commit box.
+    pub commit_summary: String,
+    pub commit_body: text_editor::Content,
+    pub amend: bool,
+    pub generating: bool,
 
     pub tools: Vec<Tool>,
     pub tool: Option<String>,
@@ -74,12 +111,6 @@ pub struct Workspace {
     pub term_size: (u16, u16),
     pub session: Option<Session>,
 
-    /// Session whose checkpoints the timeline shows (current or most recent).
-    pub timeline_session: Option<String>,
-    pub checkpoints: Vec<Checkpoint>,
-    checkpoint_busy: bool,
-    queued_checkpoint: Option<String>,
-
     pub error: Option<String>,
     pub notice: Option<String>,
 }
@@ -89,7 +120,7 @@ pub enum WsMessage {
     ToggleSection(RefKind),
     Refresh,
     Loaded(Result<Arc<RepoData>, String>),
-    FsChanged(ChangeBatch),
+    FsChanged,
 
     ShowWorktree,
     SelectCommit(String),
@@ -105,7 +136,36 @@ pub enum WsMessage {
     ToggleChangesOnly,
     SetTreeView(bool),
     ToggleDir(String),
+    ToggleStashes,
     ThemeChanged,
+
+    /// Right-click; handled by the app, which owns the menu overlay.
+    OpenMenu(Target),
+    Request(Op),
+    OpDone(Op, Result<Option<String>, String>),
+    Checkout(CheckoutTarget),
+    CheckoutCommit(String),
+    CopyText(String),
+    CopyCommitMessage(String),
+    CommitMessageCopied(Result<String, String>),
+    Compare { from: String, to: Option<String> },
+    TogglePin(String),
+
+    OpenDialog(DialogKind),
+    DialogInput(String),
+    DialogInput2(String),
+    DialogCheck(bool),
+    DialogConfirm,
+    DialogCancel,
+
+    CommitSummary(String),
+    CommitBody(text_editor::Action),
+    ToggleAmend(bool),
+    GenerateMessage,
+    MessageGenerated(Result<String, String>),
+    DoCommit,
+    StageAll,
+    UnstageAll,
 
     ToolSelected(String),
     StartSession,
@@ -113,23 +173,17 @@ pub enum WsMessage {
     Term(TermEvent),
     TermResize(u16, u16),
     TermScroll(i32),
+    /// Jumps the terminal view to this many lines back into history.
+    TermScrollTo(usize),
     TermFocus(bool),
     Key(Key, Modifiers, Option<String>),
     Paste(Option<String>),
-    Tick(Instant),
-
-    CheckpointNow,
-    CheckpointDone(Result<Option<Checkpoint>, String>),
-    TimelineLoaded(Result<Option<(String, Vec<Checkpoint>)>, String>),
-    SelectCheckpoint(u32),
-    RestoreCheckpoint(u32),
-    Restored(Result<Checkpoint, String>),
 
     DismissError,
 }
 
 impl Workspace {
-    pub fn new(path: PathBuf, tools: Vec<Tool>) -> (Self, Task<WsMessage>) {
+    pub fn new(path: PathBuf, tools: Vec<Tool>, pinned: Option<String>) -> (Self, Task<WsMessage>) {
         let tool = tools.first().map(|t| t.name.clone());
         let mut ws = Self {
             path: path.clone(),
@@ -148,6 +202,14 @@ impl Workspace {
             changes_only: true,
             tree_view: true,
             collapsed_dirs: HashSet::new(),
+            collapsed_stash: false,
+            pinned,
+            dialog: None,
+            busy: None,
+            commit_summary: String::new(),
+            commit_body: text_editor::Content::new(),
+            amend: false,
+            generating: false,
             tools,
             tool,
             terminal: None,
@@ -156,10 +218,6 @@ impl Workspace {
             term_focused: false,
             term_size: (120, 20),
             session: None,
-            timeline_session: None,
-            checkpoints: Vec::new(),
-            checkpoint_busy: false,
-            queued_checkpoint: None,
             error: None,
             notice: None,
         };
@@ -196,14 +254,7 @@ impl Workspace {
                     }
                 }
             }
-            WsMessage::FsChanged(batch) => {
-                if batch.worktree
-                    && let Some(s) = self.session.as_mut().filter(|s| s.running)
-                {
-                    s.scheduler.on_change(Instant::now());
-                }
-                self.request_reload()
-            }
+            WsMessage::FsChanged => self.request_reload(),
 
             WsMessage::ShowWorktree => {
                 self.selection = Selection::Worktree;
@@ -282,6 +333,10 @@ impl Workspace {
                 }
                 Task::none()
             }
+            WsMessage::ToggleStashes => {
+                self.collapsed_stash = !self.collapsed_stash;
+                Task::none()
+            }
             WsMessage::ThemeChanged => {
                 self.graph_cache.clear();
                 self.term_cache.clear();
@@ -319,7 +374,7 @@ impl Workspace {
                     s.running = false;
                     s.exit_code = code;
                 }
-                self.checkpoint("fim da sessão".into())
+                Task::none()
             }
             WsMessage::TermResize(cols, rows) => {
                 self.term_size = (cols, rows);
@@ -338,9 +393,23 @@ impl Workspace {
                 }
                 Task::none()
             }
+            WsMessage::TermScrollTo(offset) => {
+                if let Some(t) = &self.terminal {
+                    t.scroll_to(offset);
+                    self.term_snapshot = Some(t.snapshot());
+                    self.term_cache.clear();
+                }
+                Task::none()
+            }
             WsMessage::TermFocus(focused) => {
                 self.term_focused = focused && self.terminal.is_some();
                 self.term_cache.clear();
+                Task::none()
+            }
+            WsMessage::Key(key, _, _) if self.dialog.is_some() => {
+                if key == Key::Named(iced::keyboard::key::Named::Escape) {
+                    self.dialog = None;
+                }
                 Task::none()
             }
             WsMessage::Key(key, mods, text) => {
@@ -361,74 +430,144 @@ impl Workspace {
                 }
                 Task::none()
             }
-            WsMessage::Tick(now) => {
-                let due = self.session.as_ref().is_some_and(|s| s.running && s.scheduler.is_due(now));
-                if due {
-                    let n = self.repo.as_ref().map_or(0, |r| r.changes.len());
-                    self.checkpoint(format!("{n} arquivo(s) alterado(s)"))
-                } else {
-                    Task::none()
-                }
-            }
-
-            WsMessage::CheckpointNow => {
-                // Without any session yet, a manual checkpoint starts a timeline of its own.
-                if self.timeline_session.is_none() {
-                    self.timeline_session = Some(util::session_id(util::now_secs()));
-                }
-                self.checkpoint("manual".into())
-            }
-            WsMessage::CheckpointDone(result) => {
-                self.checkpoint_busy = false;
+            // The app intercepts this to show the menu.
+            WsMessage::OpenMenu(_) => Task::none(),
+            WsMessage::Request(op) => self.request(op),
+            WsMessage::OpDone(op, result) => {
+                self.busy = None;
                 match result {
-                    Ok(Some(cp)) => {
-                        if self.timeline_session.as_deref() == Some(cp.session.as_str()) {
-                            self.checkpoints.push(cp);
+                    Ok(url) => {
+                        if let Some(url) = url {
+                            util::open_url(&url);
                         }
-                    }
-                    Ok(None) => {}
-                    Err(e) => self.error = Some(format!("Falha ao criar checkpoint: {e}")),
-                }
-                match self.queued_checkpoint.take() {
-                    Some(label) => self.checkpoint(label),
-                    None => Task::none(),
-                }
-            }
-            WsMessage::TimelineLoaded(result) => {
-                match result {
-                    Ok(None) => {}
-                    Ok(Some((session, list))) => {
-                        if self.session.is_none() {
-                            self.timeline_session = Some(session);
-                            self.checkpoints = list;
+                        let done = op.done();
+                        if !done.is_empty() {
+                            self.error = None;
+                            self.notice = Some(done);
+                        }
+                        if matches!(op, Op::Commit { .. }) {
+                            self.commit_summary.clear();
+                            self.commit_body = text_editor::Content::new();
+                            self.amend = false;
                         }
                     }
                     Err(e) => self.error = Some(e),
                 }
-                Task::none()
+                self.request_reload()
             }
-            WsMessage::SelectCheckpoint(seq) => {
-                self.selection = Selection::Checkpoint(seq);
+            WsMessage::Checkout(target) => self.request(Op::Checkout(target)),
+            WsMessage::CheckoutCommit(id) => self.checkout_commit(&id),
+            WsMessage::CopyText(text) => {
+                self.notice = Some(format!("Copiado: {}", crate::menu::rev_label(&text)));
+                iced::clipboard::write(text)
+            }
+            WsMessage::CopyCommitMessage(id) => {
+                let Some(repo) = &self.repo else { return Task::none() };
+                let git = repo.git();
+                Task::perform(
+                    blocking(move || {
+                        let info = brio_ops::files::commit_info(&git, &id).map_err(|e| e.to_string())?;
+                        Ok(if info.body.is_empty() { info.summary } else { format!("{}\n\n{}", info.summary, info.body) })
+                    }),
+                    WsMessage::CommitMessageCopied,
+                )
+            }
+            WsMessage::CommitMessageCopied(result) => match result {
+                Ok(text) => {
+                    self.notice = Some("Mensagem do commit copiada.".into());
+                    iced::clipboard::write(text)
+                }
+                Err(e) => {
+                    self.error = Some(e);
+                    Task::none()
+                }
+            },
+            WsMessage::Compare { from, to } => {
+                self.selection = Selection::Compare { from, to };
                 self.graph_cache.clear();
                 self.load_details()
             }
-            WsMessage::RestoreCheckpoint(seq) => self.restore(seq),
-            WsMessage::Restored(result) => {
-                self.checkpoint_busy = false;
-                match result {
-                    Ok(safety) => {
-                        self.notice = Some(format!(
-                            "Checkpoint restaurado. O estado anterior foi salvo como #{}.",
-                            safety.seq
-                        ));
-                        self.checkpoints.push(safety);
-                        self.request_reload()
-                    }
-                    Err(e) => {
-                        self.error = Some(format!("Falha ao restaurar: {e}"));
-                        Task::none()
-                    }
+            WsMessage::TogglePin(name) => {
+                self.pinned = if self.pinned.as_deref() == Some(name.as_str()) { None } else { Some(name) };
+                self.request_reload()
+            }
+
+            WsMessage::OpenDialog(kind) => {
+                let check = matches!(kind, DialogKind::CreateBranch { .. });
+                self.dialog = Some(Dialog { kind, input: String::new(), input2: String::new(), check, error: None });
+                iced::widget::operation::focus(DIALOG_INPUT)
+            }
+            WsMessage::DialogInput(v) => {
+                if let Some(d) = self.dialog.as_mut() {
+                    d.input = v;
+                    d.error = None;
                 }
+                Task::none()
+            }
+            WsMessage::DialogInput2(v) => {
+                if let Some(d) = self.dialog.as_mut() {
+                    d.input2 = v;
+                }
+                Task::none()
+            }
+            WsMessage::DialogCheck(v) => {
+                if let Some(d) = self.dialog.as_mut() {
+                    d.check = v;
+                }
+                Task::none()
+            }
+            WsMessage::DialogCancel => {
+                self.dialog = None;
+                Task::none()
+            }
+            WsMessage::DialogConfirm => self.confirm_dialog(),
+
+            WsMessage::CommitSummary(v) => {
+                self.commit_summary = v;
+                Task::none()
+            }
+            WsMessage::CommitBody(action) => {
+                self.commit_body.perform(action);
+                Task::none()
+            }
+            WsMessage::ToggleAmend(amend) => {
+                self.amend = amend;
+                // Start from the message being amended.
+                if amend
+                    && self.commit_summary.trim().is_empty()
+                    && let Some(repo) = &self.repo
+                    && let Ok(message) = brio_ops::actions::last_commit_message(&repo.git())
+                {
+                    self.set_commit_message(&message);
+                }
+                Task::none()
+            }
+            WsMessage::GenerateMessage => self.generate_message(),
+            WsMessage::MessageGenerated(result) => {
+                self.generating = false;
+                match result {
+                    Ok(message) => self.set_commit_message(&message),
+                    Err(e) => self.error = Some(e),
+                }
+                Task::none()
+            }
+            WsMessage::DoCommit => {
+                let summary = self.commit_summary.trim();
+                if summary.is_empty() {
+                    self.error = Some("Escreva o resumo do commit.".into());
+                    return Task::none();
+                }
+                let body = self.commit_body.text();
+                let message = if body.trim().is_empty() { summary.to_owned() } else { format!("{summary}\n\n{}", body.trim()) };
+                self.request(Op::Commit { message, amend: self.amend })
+            }
+            WsMessage::StageAll => {
+                let paths = self.paths(|c| c.unstaged);
+                if paths.is_empty() { Task::none() } else { self.request(Op::Stage(paths)) }
+            }
+            WsMessage::UnstageAll => {
+                let paths = self.paths(|c| c.staged);
+                if paths.is_empty() { Task::none() } else { self.request(Op::Unstage(paths)) }
             }
 
             WsMessage::DismissError => {
@@ -441,7 +580,8 @@ impl Workspace {
 
     fn load(&mut self, path: PathBuf) -> Task<WsMessage> {
         self.loading = true;
-        Task::perform(blocking(move || RepoData::load(&path).map(Arc::new)), WsMessage::Loaded)
+        let pinned = self.pinned.clone();
+        Task::perform(blocking(move || RepoData::load(&path, pinned.as_deref()).map(Arc::new)), WsMessage::Loaded)
     }
 
     fn request_reload(&mut self) -> Task<WsMessage> {
@@ -463,26 +603,14 @@ impl Workspace {
             self.selection = Selection::Worktree;
             self.details = None;
             self.file_view = None;
-            self.checkpoints.clear();
-            self.timeline_session = None;
             self.error = None;
-            match lazygit_session::watcher::watch(&data.workdir, &data.git_dir) {
+            match brio_session::watcher::watch(&data.workdir, &data.git_dir) {
                 Ok((handle, rx)) => {
                     self.watch = Some(handle);
-                    tasks.push(Task::run(rx, WsMessage::FsChanged));
+                    tasks.push(Task::run(rx, |_| WsMessage::FsChanged));
                 }
                 Err(e) => self.error = Some(format!("Sem atualização automática: {e}")),
             }
-            let git = data.git();
-            tasks.push(Task::perform(
-                blocking(move || {
-                    let sessions = checkpoint::sessions(&git).map_err(|e| e.to_string())?;
-                    let Some(last) = sessions.last() else { return Ok(None) };
-                    let list = checkpoint::list(&git, last).map_err(|e| e.to_string())?;
-                    Ok(Some((last.clone(), list)))
-                }),
-                WsMessage::TimelineLoaded,
-            ));
         }
 
         // Keep the selection meaningful after a refresh.
@@ -519,13 +647,9 @@ impl Workspace {
                 let id = id.clone();
                 Box::new(move || fileview::commit_details(&git, &id))
             }
-            Selection::Checkpoint(seq) => {
-                let Some(pos) = self.checkpoints.iter().position(|c| c.seq == *seq) else {
-                    return Task::none();
-                };
-                let id = self.checkpoints[pos].id.clone();
-                let prev = pos.checked_sub(1).map(|p| self.checkpoints[p].id.clone());
-                Box::new(move || fileview::checkpoint_details(&git, &id, prev))
+            Selection::Compare { from, to } => {
+                let (from, to) = (from.clone(), to.clone());
+                Box::new(move || fileview::compare_details(&git, &from, to.as_deref()))
             }
         };
         Task::perform(blocking(move || job().map(Arc::new)), move |r| WsMessage::DetailsLoaded(token, r))
@@ -545,6 +669,120 @@ impl Workspace {
         })
     }
 
+    fn is_dirty(&self) -> bool {
+        self.repo.as_ref().is_some_and(|r| r.changes.iter().any(|c| c.kind != brio_ops::ChangeKind::Untracked))
+    }
+
+    fn paths(&self, pick: impl Fn(&brio_ops::FileChange) -> bool) -> Vec<String> {
+        self.repo.as_ref().map(|r| r.changes.iter().filter(|c| pick(c)).map(|c| c.path.clone()).collect()).unwrap_or_default()
+    }
+
+    fn set_commit_message(&mut self, message: &str) {
+        let message = message.trim();
+        let (summary, body) = message.split_once('\n').unwrap_or((message, ""));
+        self.commit_summary = summary.trim().to_owned();
+        self.commit_body = text_editor::Content::with_text(body.trim());
+    }
+
+    /// Asks before checkouts over local changes and before destructive ops.
+    fn request(&mut self, op: Op) -> Task<WsMessage> {
+        if let Op::Checkout(target) = &op
+            && self.is_dirty()
+        {
+            self.dialog = Some(Dialog { kind: DialogKind::DirtyCheckout(target.clone()), input: String::new(), input2: String::new(), check: false, error: None });
+            return Task::none();
+        }
+        if op.confirmation().is_some() {
+            self.dialog = Some(Dialog { kind: DialogKind::Confirm(op), input: String::new(), input2: String::new(), check: false, error: None });
+            return Task::none();
+        }
+        self.run_op(op)
+    }
+
+    fn run_op(&mut self, op: Op) -> Task<WsMessage> {
+        let Some(repo) = &self.repo else { return Task::none() };
+        if let Some(busy) = &self.busy {
+            self.notice = Some(format!("Aguarde: {busy}"));
+            return Task::none();
+        }
+        self.busy = Some(op.progress());
+        let git = repo.git();
+        let job = op.clone();
+        Task::perform(blocking(move || Ok(job.run(&git))), move |r: Result<_, String>| {
+            WsMessage::OpDone(op.clone(), r.and_then(|inner| inner))
+        })
+    }
+
+    fn confirm_dialog(&mut self) -> Task<WsMessage> {
+        let Some(dialog) = self.dialog.as_mut() else { return Task::none() };
+        let name = dialog.input.trim().to_owned();
+        let needs_name = matches!(dialog.kind, DialogKind::CreateBranch { .. } | DialogKind::CreateTag { .. } | DialogKind::RenameBranch { .. });
+        if needs_name && let Err(e) = validate_ref_name(&name) {
+            dialog.error = Some(e);
+            return Task::none();
+        }
+        let op = match dialog.kind.clone() {
+            DialogKind::CreateBranch { at } => Op::CreateBranch { name, at, checkout: dialog.check },
+            DialogKind::CreateTag { at } => {
+                let message = Some(dialog.input2.trim().to_owned()).filter(|m| !m.is_empty());
+                Op::CreateTag { name, at, message }
+            }
+            DialogKind::RenameBranch { old } => Op::RenameBranch { old, new: name },
+            DialogKind::Confirm(op) => op,
+            DialogKind::DirtyCheckout(target) => Op::StashAndCheckout(target),
+        };
+        self.dialog = None;
+        self.run_op(op)
+    }
+
+    /// Double-click: check out a branch at the commit, else track a remote
+    /// branch, else detach.
+    fn checkout_commit(&mut self, id: &str) -> Task<WsMessage> {
+        let Some(repo) = &self.repo else { return Task::none() };
+        let current = repo.current_branch();
+        let refs: Vec<_> = repo.refs_at(id).collect();
+        if let Some(cur) = current
+            && refs.iter().any(|r| r.kind == RefKind::LocalBranch && r.name == cur)
+        {
+            self.notice = Some(format!("Você já está em {cur}."));
+            return Task::none();
+        }
+        let target = if let Some(local) = refs.iter().find(|r| r.kind == RefKind::LocalBranch) {
+            CheckoutTarget::Branch(local.name.clone())
+        } else if let Some(remote) = refs.iter().find(|r| r.kind == RefKind::RemoteBranch) {
+            CheckoutTarget::Remote(remote.name.clone())
+        } else {
+            CheckoutTarget::Detached(id.to_owned())
+        };
+        self.request(Op::Checkout(target))
+    }
+
+    fn generate_message(&mut self) -> Task<WsMessage> {
+        let Some(repo) = &self.repo else { return Task::none() };
+        let Some(tool) = self.tools.iter().find(|t| Some(&t.name) == self.tool.as_ref()).cloned() else {
+            self.error = Some("Escolha uma IA na Sessão de IA.".into());
+            return Task::none();
+        };
+        if !brio_session::ai::supports(&tool) {
+            self.error = Some(format!("{} não gera mensagens sem interface; escolha claude, codex ou gemini.", tool.name));
+            return Task::none();
+        }
+        if !repo.changes.iter().any(|c| c.staged) {
+            self.error = Some("Coloque arquivos em stage antes de gerar a mensagem.".into());
+            return Task::none();
+        }
+        self.generating = true;
+        let git = repo.git();
+        let cwd = repo.workdir.clone();
+        Task::perform(
+            blocking(move || {
+                let diff = brio_ops::actions::staged_diff(&git).map_err(|e| e.to_string())?;
+                brio_session::ai::commit_message(&tool, &cwd, &diff)
+            }),
+            WsMessage::MessageGenerated,
+        )
+    }
+
     fn start_session(&mut self) -> Task<WsMessage> {
         let Some(repo) = &self.repo else { return Task::none() };
         let Some(tool) = self.tools.iter().find(|t| Some(&t.name) == self.tool.as_ref()).cloned() else {
@@ -554,7 +792,6 @@ impl Workspace {
         let (cols, rows) = self.term_size;
         match Terminal::spawn(&tool, &repo.workdir, cols, rows) {
             Ok((terminal, rx)) => {
-                let id = util::session_id(util::now_secs());
                 self.terminal = Some(terminal);
                 self.term_snapshot = None;
                 self.term_cache.clear();
@@ -562,13 +799,9 @@ impl Workspace {
                 self.session = Some(Session {
                     tool: tool.name.clone(),
                     running: true,
-                    scheduler: CheckpointScheduler::default(),
                     exit_code: None,
                 });
-                self.timeline_session = Some(id);
-                self.checkpoints.clear();
-                let start = self.checkpoint("início da sessão".into());
-                Task::batch([Task::run(rx, WsMessage::Term), start])
+                Task::run(rx, WsMessage::Term)
             }
             Err(e) => {
                 self.error = Some(format!("Não foi possível iniciar {}: {e}", tool.name));
@@ -576,47 +809,32 @@ impl Workspace {
             }
         }
     }
+}
 
-    fn next_seq(&self) -> u32 {
-        self.checkpoints.iter().map(|c| c.seq + 1).max().unwrap_or(0)
+/// Rejects names git would refuse, with a readable reason.
+fn validate_ref_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Digite um nome.".into());
     }
+    let bad = name.chars().any(|c| c.is_whitespace() || "~^:?*[\\".contains(c))
+        || name.contains("..")
+        || name.contains("@{")
+        || name.starts_with(['-', '/'])
+        || name.ends_with(['/', '.'])
+        || name.ends_with(".lock");
+    if bad { Err("Nome inválido: sem espaços nem ~ ^ : ? * [ \\ ..".into()) } else { Ok(()) }
+}
 
-    /// Takes a checkpoint of the timeline session, one at a time.
-    fn checkpoint(&mut self, label: String) -> Task<WsMessage> {
-        let (Some(repo), Some(session)) = (&self.repo, self.timeline_session.clone()) else {
-            return Task::none();
-        };
-        if self.checkpoint_busy {
-            self.queued_checkpoint = Some(label);
-            return Task::none();
-        }
-        self.checkpoint_busy = true;
-        if let Some(s) = self.session.as_mut() {
-            s.scheduler.checkpointed(Instant::now());
-        }
-        let git = repo.git();
-        let seq = self.next_seq();
-        Task::perform(
-            blocking(move || checkpoint::create(&git, &session, seq, &label).map_err(|e| e.to_string())),
-            WsMessage::CheckpointDone,
-        )
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    fn restore(&mut self, seq: u32) -> Task<WsMessage> {
-        let Some(repo) = &self.repo else { return Task::none() };
-        let Some(target) = self.checkpoints.iter().find(|c| c.seq == seq).cloned() else {
-            return Task::none();
-        };
-        if self.checkpoint_busy {
-            self.notice = Some("Aguarde o checkpoint em andamento terminar.".into());
-            return Task::none();
+    #[test]
+    fn ref_names_are_validated() {
+        assert!(validate_ref_name("feat/login-jwt").is_ok());
+        assert!(validate_ref_name("v1.2.0").is_ok());
+        for bad in ["", "com espaço", "a..b", "x~1", "fim/", "-x", "a.lock", "a@{b"] {
+            assert!(validate_ref_name(bad).is_err(), "{bad}");
         }
-        self.checkpoint_busy = true;
-        let git = repo.git();
-        let safety = self.next_seq();
-        Task::perform(
-            blocking(move || checkpoint::restore(&git, &target, safety).map_err(|e| e.to_string())),
-            WsMessage::Restored,
-        )
     }
 }

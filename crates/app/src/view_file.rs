@@ -4,8 +4,8 @@ use std::ops::Range;
 
 use iced::widget::{button, center, column, container, rich_text, row, scrollable, space, span, text};
 use iced::{Alignment, Color, Element, Fill, Font, Length};
-use lazygit_core::textdiff::{Cell, Kind, Row, SplitRow, UnifiedLine};
-use lazygit_ops::ChangeKind;
+use brio_core::textdiff::{Cell, Kind, Row, SplitRow, UnifiedLine};
+use brio_ops::ChangeKind;
 
 use crate::fileview::{DiffDoc, FileTarget, FileView, Mode};
 use crate::highlight::Line;
@@ -239,7 +239,7 @@ fn fill(color: Option<Color>) -> impl Fn(&iced::Theme) -> container::Style {
     move |_| container::Style { background: color.map(Into::into), ..Default::default() }
 }
 
-fn blame_body<'a>(lines: &'a [lazygit_ops::files::BlameLine], hl: &'a [Line]) -> Element<'a, WsMessage> {
+fn blame_body<'a>(lines: &'a [brio_ops::files::BlameLine], hl: &'a [Line]) -> Element<'a, WsMessage> {
     let p = style::p();
     let now = util::now_secs();
     let mut col = column![];
@@ -276,7 +276,7 @@ fn blame_body<'a>(lines: &'a [lazygit_ops::files::BlameLine], hl: &'a [Line]) ->
     scrollable(col).height(Fill).into()
 }
 
-fn history_body(entries: &[lazygit_ops::files::HistoryEntry]) -> Element<'_, WsMessage> {
+fn history_body(entries: &[brio_ops::files::HistoryEntry]) -> Element<'_, WsMessage> {
     let p = style::p();
     let now = util::now_secs();
     let mut col = column![].spacing(2);

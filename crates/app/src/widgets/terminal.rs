@@ -3,8 +3,8 @@
 use iced::mouse;
 use iced::widget::canvas::{self, Cache, Geometry, Path, Stroke, Text};
 use iced::{Color, Font, Pixels, Point, Rectangle, Renderer, Size, Theme};
-use lazygit_session::TermSnapshot;
-use lazygit_session::pty::{DEFAULT_BG, DEFAULT_FG};
+use brio_session::TermSnapshot;
+use brio_session::pty::{DEFAULT_BG, DEFAULT_FG};
 
 use crate::workspace::WsMessage as Message;
 use crate::style;
@@ -14,6 +14,9 @@ pub const FONT_SIZE: f32 = 13.0;
 pub const CELL_W: f32 = 7.8;
 pub const CELL_H: f32 = 17.0;
 const PAD: f32 = 6.0;
+/// Width reserved on the right for the scrollbar.
+const SCROLLBAR_W: f32 = 10.0;
+const THUMB_MIN_H: f32 = 24.0;
 
 pub struct TerminalView<'a> {
     pub snapshot: Option<&'a TermSnapshot>,
@@ -24,16 +27,42 @@ pub struct TerminalView<'a> {
     pub placeholder: &'a str,
 }
 
-/// Remembers the last size we asked for, so resizes are requested once.
 #[derive(Default)]
 pub struct ViewState {
+    /// Last size we asked for, so resizes are requested once.
     requested: Option<(u16, u16)>,
+    /// Fractional wheel lines not yet sent; touchpads scroll a few pixels at a time.
+    wheel: f32,
+    /// Whether the scrollbar thumb is being dragged.
+    dragging: bool,
 }
 
 pub fn grid_size(bounds: Size) -> (u16, u16) {
-    let cols = ((bounds.width - 2.0 * PAD) / CELL_W).floor().max(2.0) as u16;
+    let cols = ((bounds.width - 2.0 * PAD - SCROLLBAR_W) / CELL_W).floor().max(2.0) as u16;
     let rows = ((bounds.height - 2.0 * PAD) / CELL_H).floor().max(2.0) as u16;
     (cols, rows)
+}
+
+/// Scrollbar geometry: (track, thumb) for a snapshot with history.
+fn scrollbar(bounds: Size, snap: &TermSnapshot) -> Option<(Rectangle, Rectangle)> {
+    if snap.history == 0 {
+        return None;
+    }
+    let track = Rectangle::new(Point::new(bounds.width - SCROLLBAR_W, 0.0), Size::new(SCROLLBAR_W, bounds.height));
+    let total = (snap.history + snap.rows) as f32;
+    let thumb_h = (track.height * snap.rows as f32 / total).clamp(THUMB_MIN_H.min(track.height), track.height);
+    let travel = track.height - thumb_h;
+    let top = travel * (snap.history - snap.scrolled.min(snap.history)) as f32 / snap.history as f32;
+    let thumb = Rectangle::new(Point::new(track.x + 2.0, top), Size::new(SCROLLBAR_W - 4.0, thumb_h));
+    Some((track, thumb))
+}
+
+/// History offset that puts the thumb's center at `y` (relative to the widget).
+fn offset_at(y: f32, bounds: Size, snap: &TermSnapshot) -> usize {
+    let Some((track, thumb)) = scrollbar(bounds, snap) else { return 0 };
+    let travel = (track.height - thumb.height).max(1.0);
+    let frac = ((y - thumb.height / 2.0) / travel).clamp(0.0, 1.0);
+    snap.history - (frac * snap.history as f32).round() as usize
 }
 
 fn rgb([r, g, b]: [u8; 3]) -> Color {
@@ -65,7 +94,27 @@ impl canvas::Program<Message> for TerminalView<'_> {
             return Some(canvas::Action::publish(Message::TermResize(wanted.0, wanted.1)));
         }
 
+        let size = bounds.size();
+        let bar = self.snapshot.and_then(|snap| scrollbar(size, snap).map(|b| (snap, b)));
+
         match event {
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+                if bar.is_some_and(|(_, (track, _))| cursor.position_in(bounds).is_some_and(|p| track.contains(p))) =>
+            {
+                let (snap, _) = bar?;
+                let y = cursor.position_in(bounds)?.y;
+                state.dragging = true;
+                return Some(canvas::Action::publish(Message::TermScrollTo(offset_at(y, size, snap))).and_capture());
+            }
+            canvas::Event::Mouse(mouse::Event::CursorMoved { position }) if state.dragging => {
+                let (snap, _) = bar?;
+                let y = position.y - bounds.y;
+                return Some(canvas::Action::publish(Message::TermScrollTo(offset_at(y, size, snap))).and_capture());
+            }
+            canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) if state.dragging => {
+                state.dragging = false;
+                return Some(canvas::Action::request_redraw().and_capture());
+            }
             canvas::Event::Mouse(mouse::Event::ButtonPressed(_)) => {
                 let inside = cursor.is_over(bounds);
                 if inside != self.focused {
@@ -74,30 +123,44 @@ impl canvas::Program<Message> for TerminalView<'_> {
                 }
             }
             canvas::Event::Mouse(mouse::Event::WheelScrolled { delta }) if cursor.is_over(bounds) => {
-                let lines = match delta {
+                state.wheel += match delta {
                     mouse::ScrollDelta::Lines { y, .. } => y * 3.0,
                     mouse::ScrollDelta::Pixels { y, .. } => y / CELL_H,
                 };
-                if lines.abs() >= 1.0 {
-                    return Some(canvas::Action::publish(Message::TermScroll(lines as i32)).and_capture());
+                let lines = state.wheel.trunc();
+                if lines == 0.0 {
+                    return Some(canvas::Action::capture());
                 }
+                state.wheel -= lines;
+                return Some(canvas::Action::publish(Message::TermScroll(lines as i32)).and_capture());
             }
             _ => {}
         }
         None
     }
 
-    fn mouse_interaction(&self, _state: &ViewState, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
-        if cursor.is_over(bounds) { mouse::Interaction::Text } else { mouse::Interaction::default() }
+    fn mouse_interaction(&self, state: &ViewState, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
+        let on_bar = self
+            .snapshot
+            .and_then(|snap| scrollbar(bounds.size(), snap))
+            .zip(cursor.position_in(bounds))
+            .is_some_and(|((track, _), p)| track.contains(p));
+        if state.dragging || on_bar {
+            mouse::Interaction::default()
+        } else if cursor.is_over(bounds) {
+            mouse::Interaction::Text
+        } else {
+            mouse::Interaction::default()
+        }
     }
 
     fn draw(
         &self,
-        _state: &ViewState,
+        state: &ViewState,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
-        _cursor: mouse::Cursor,
+        cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let geometry = self.cache.draw(renderer, bounds.size(), |frame| {
             let size = bounds.size();
@@ -165,7 +228,7 @@ impl canvas::Program<Message> for TerminalView<'_> {
             if snap.scrolled > 0 {
                 frame.fill_text(Text {
                     content: format!("↑ histórico ({} linhas)", snap.scrolled),
-                    position: Point::new(size.width - 200.0, PAD),
+                    position: Point::new(size.width - SCROLLBAR_W - 200.0, PAD),
                     color: style::p().warn,
                     size: Pixels(12.0),
                     ..Text::default()
@@ -174,6 +237,17 @@ impl canvas::Program<Message> for TerminalView<'_> {
         });
 
         let mut layers = vec![geometry];
+        if let Some((track, thumb)) = self.snapshot.and_then(|snap| scrollbar(bounds.size(), snap)) {
+            let hovered = cursor.position_in(bounds).is_some_and(|p| track.contains(p));
+            let alpha = if state.dragging { 0.9 } else if hovered { 0.7 } else { 0.45 };
+            let mut frame = canvas::Frame::new(renderer, bounds.size());
+            frame.fill_rectangle(track.position(), track.size(), style::p().muted.scale_alpha(0.08));
+            frame.fill(
+                &Path::rounded_rectangle(thumb.position(), thumb.size(), (thumb.width / 2.0).into()),
+                style::p().muted.scale_alpha(alpha),
+            );
+            layers.push(frame.into_geometry());
+        }
         if self.focused {
             let mut frame = canvas::Frame::new(renderer, bounds.size());
             frame.stroke(

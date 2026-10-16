@@ -1,0 +1,4 @@
+#!/bin/sh
+# Entry point of the AppImage: runs the bundled binary with the user's args.
+HERE="$(dirname "$(readlink -f "$0")")"
+exec "$HERE/usr/bin/brio-git" "$@"

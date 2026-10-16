@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=brio-git
+Comment=Cliente Git com sessões de IA
+Exec=brio-git %F
+Icon=brio-git
+Terminal=false
+Categories=Development;RevisionControl;
+StartupWMClass=brio-git

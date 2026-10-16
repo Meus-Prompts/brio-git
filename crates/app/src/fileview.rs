@@ -3,9 +3,9 @@
 
 use std::sync::Arc;
 
-use lazygit_core::textdiff::FileDiff;
-use lazygit_ops::files::{self, BlameLine, CommitInfo, Content, HistoryEntry};
-use lazygit_ops::{ChangeKind, FileChange, Git};
+use brio_core::textdiff::FileDiff;
+use brio_ops::files::{self, BlameLine, CommitInfo, Content, HistoryEntry};
+use brio_ops::{ChangeKind, FileChange, Git};
 
 use crate::highlight::{self, Line};
 use crate::style;
@@ -161,13 +161,14 @@ fn load_blame(git: &Git, t: &FileTarget, theme: two_face::theme::EmbeddedThemeNa
     Ok(BlameDoc { lines, hl })
 }
 
-/// What the details panel shows for a commit or checkpoint.
+/// What the details panel shows for a commit or a comparison.
 #[derive(Debug)]
 pub struct Details {
     pub info: Option<CommitInfo>,
     pub files: Vec<FileChange>,
     pub old_rev: Option<String>,
-    pub new_rev: String,
+    /// `None` is the working tree.
+    pub new_rev: Option<String>,
 }
 
 /// Details of commit `id`, compared with its first parent.
@@ -175,17 +176,17 @@ pub fn commit_details(git: &Git, id: &str) -> Result<Details, String> {
     let info = files::commit_info(git, id).map_err(|e| e.to_string())?;
     let old_rev = info.parents.first().cloned();
     let files = files::changed(git, old_rev.as_deref(), id).map_err(|e| e.to_string())?;
-    Ok(Details { info: Some(info), files, old_rev, new_rev: id.to_owned() })
+    Ok(Details { info: Some(info), files, old_rev, new_rev: Some(id.to_owned()) })
 }
 
-/// Files a checkpoint changed since `prev` (or since the HEAD it was taken on).
-pub fn checkpoint_details(git: &Git, id: &str, prev: Option<String>) -> Result<Details, String> {
-    let old_rev = match prev {
-        Some(p) => Some(p),
-        None => files::commit_info(git, id).map_err(|e| e.to_string())?.parents.first().cloned(),
-    };
-    let files = files::changed(git, old_rev.as_deref(), id).map_err(|e| e.to_string())?;
-    Ok(Details { info: None, files, old_rev, new_rev: id.to_owned() })
+/// Files that differ from `from` to `to` (`None` = working tree).
+pub fn compare_details(git: &Git, from: &str, to: Option<&str>) -> Result<Details, String> {
+    let files = match to {
+        Some(to) => files::changed(git, Some(from), to),
+        None => files::changed_to_worktree(git, from),
+    }
+    .map_err(|e| e.to_string())?;
+    Ok(Details { info: None, files, old_rev: Some(from.to_owned()), new_rev: to.map(str::to_owned) })
 }
 
 #[cfg(test)]
@@ -194,12 +195,12 @@ mod tests {
 
     #[test]
     fn new_files_have_no_old_side() {
-        let added = FileChange { path: "a".into(), from: None, kind: ChangeKind::Untracked, staged: false };
+        let added = FileChange { path: "a".into(), from: None, kind: ChangeKind::Untracked, staged: false, unstaged: false };
         let t = FileTarget::new(&added, Some("HEAD"), None);
         assert_eq!(t.old_rev, None);
         assert!(t.is_worktree());
 
-        let renamed = FileChange { path: "b".into(), from: Some("a".into()), kind: ChangeKind::Renamed, staged: false };
+        let renamed = FileChange { path: "b".into(), from: Some("a".into()), kind: ChangeKind::Renamed, staged: false, unstaged: false };
         let t = FileTarget::new(&renamed, Some("p"), Some("c"));
         assert_eq!((t.old_rev.as_deref(), t.old_path.as_deref()), (Some("p"), Some("a")));
     }
@@ -219,7 +220,7 @@ mod tests {
 
         let details = commit_details(&git, "HEAD").unwrap();
         assert_eq!(details.files.len(), 1);
-        let target = FileTarget::new(&details.files[0], details.old_rev.as_deref(), Some(&details.new_rev));
+        let target = FileTarget::new(&details.files[0], details.old_rev.as_deref(), details.new_rev.as_deref());
 
         let mut view = FileView::new(target);
         let Loaded::Diff(Ok(doc)) = view.job(git.clone())() else { panic!("diff failed") };

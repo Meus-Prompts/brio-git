@@ -23,9 +23,9 @@ fn git_err(e: impl std::fmt::Display) -> Error {
     Error::Git(e.to_string())
 }
 
-/// Namespace used by lazy-git for its own refs (checkpoints). They are hidden
-/// from the branch list and from the graph.
-pub const INTERNAL_REF_PREFIX: &str = "refs/lazygit/";
+/// Namespace once used by brio-git for its own refs (old checkpoints). Still
+/// hidden from the branch list and the graph so leftovers don't clutter them.
+pub const INTERNAL_REF_PREFIX: &str = "refs/brio/";
 
 pub struct Repo {
     inner: gix::Repository,
@@ -162,7 +162,7 @@ mod tests {
         git(p, &["checkout", "-q", "main"]);
         git(p, &["merge", "-q", "--no-ff", "feature", "-m", "merge feature"]);
         git(p, &["tag", "-a", "v1", "-m", "v1"]);
-        git(p, &["update-ref", "refs/lazygit/checkpoints/s/0001", "HEAD"]);
+        git(p, &["update-ref", "refs/brio/checkpoints/s/0001", "HEAD"]);
         dir
     }
 

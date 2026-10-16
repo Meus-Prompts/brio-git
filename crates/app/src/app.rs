@@ -1,16 +1,18 @@
 //! Top-level state: tabs (one [`Workspace`] per repository), the window and
 //! the panel layout shared by all tabs.
 
+use std::cell::Cell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 use iced::keyboard::{Key, Modifiers};
 use iced::widget::pane_grid;
-use iced::{Subscription, Task, Theme, event, keyboard, window};
-use lazygit_session::Tool;
+use iced::{Point, Size, Subscription, Task, Theme, event, keyboard, window};
+use brio_session::Tool;
 
 use crate::avatars::{self, Avatars};
 use crate::layout::{Layout, PaneKind};
+use crate::menu::{self, MenuItem};
 use crate::persist::{self, Saved};
 use crate::style;
 use crate::util::blocking;
@@ -41,6 +43,23 @@ pub struct App {
     pub theme: Theme,
     pub theme_picker: bool,
     pub avatars: Avatars,
+
+    /// Open context menu, if any.
+    pub menu: Option<ContextMenu>,
+    /// Last cursor position in window coordinates, written by an invisible
+    /// layer without producing messages (see `view::CursorTracker`).
+    pub cursor: Cell<Point>,
+    pub window_size: Size,
+    /// Pinned branch per repository work tree, as saved.
+    pinned: HashMap<PathBuf, String>,
+}
+
+pub struct ContextMenu {
+    pub tab: TabId,
+    pub items: Vec<MenuItem>,
+    pub position: Point,
+    /// Item whose submenu is open.
+    pub open_child: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -66,10 +85,13 @@ pub enum Message {
     OpenThemes,
     CloseThemes,
     SetTheme(&'static str),
-    AvatarLoaded(String, Option<Vec<u8>>),
+    MenuPick(WsMessage),
+    MenuHover(Option<usize>),
+    CloseMenu,
+    WindowResized(Size),
+    AvatarLoaded(String, Option<avatars::Picture>),
 
     Key(Key, Modifiers, Option<String>),
-    Tick(Instant),
     DismissError,
 }
 
@@ -83,7 +105,7 @@ impl App {
             let mut tabs: Vec<PathBuf> = saved.tabs.iter().filter(|p| p.is_dir()).cloned().collect();
             if tabs.is_empty()
                 && let Ok(cwd) = std::env::current_dir()
-                && lazygit_core::Repo::open(&cwd).is_ok()
+                && brio_core::Repo::open(&cwd).is_ok()
             {
                 tabs.push(cwd);
             }
@@ -96,7 +118,7 @@ impl App {
             tabs: Vec::new(),
             active: 0,
             next_id: 0,
-            tools: lazygit_session::tools::detect(),
+            tools: brio_session::tools::detect(),
             panes: saved.layout.build(),
             layout: saved.layout,
             window: None,
@@ -107,6 +129,10 @@ impl App {
             theme: style::p().iced_theme(),
             theme_picker: false,
             avatars: Avatars::default(),
+            menu: None,
+            cursor: Cell::new(Point::ORIGIN),
+            window_size: Size::new(1440.0, 920.0),
+            pinned: saved.pinned.iter().map(|(k, v)| (PathBuf::from(k), v.clone())).collect(),
         };
         let mut tasks: Vec<Task<Message>> = paths.into_iter().map(|p| app.open_tab(p)).collect();
         if restoring {
@@ -118,8 +144,8 @@ impl App {
 
     pub fn title(&self) -> String {
         match self.current() {
-            Some(ws) => format!("lazy-git — {}", ws.name()),
-            None => "lazy-git".into(),
+            Some(ws) => format!("brio-git — {}", ws.name()),
+            None => "brio-git".into(),
         }
     }
 
@@ -143,20 +169,46 @@ impl App {
             ) => Some(Message::Key(key, modifiers, text.map(|t| t.to_string()))),
             _ => None,
         });
-        let tick = if self.tabs.iter().any(|t| t.ws.session_running()) {
-            iced::time::every(Duration::from_secs(1)).map(Message::Tick)
-        } else {
-            Subscription::none()
-        };
         let close = window::close_requests().map(|_| Message::Close);
-        Subscription::batch([keys, tick, close])
+        let resize = window::resize_events().map(|(_, size)| Message::WindowResized(size));
+        Subscription::batch([keys, close, resize])
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::Tab(id, WsMessage::OpenMenu(target)) => {
+                let Some(ws) = self.tabs.iter().find(|t| t.id == id).map(|t| &t.ws) else { return Task::none() };
+                let Some(repo) = &ws.repo else { return Task::none() };
+                let items = menu::build(repo, ws.pinned.as_deref(), &target);
+                self.menu = Some(ContextMenu { tab: id, items, position: self.cursor.get(), open_child: None });
+                Task::none()
+            }
             Message::Tab(id, msg) => {
+                let pin = matches!(msg, WsMessage::TogglePin(_));
                 let avatars = self.fetch_avatars(&msg);
-                Task::batch([avatars, self.forward(id, msg)])
+                let task = Task::batch([avatars, self.forward(id, msg)]);
+                if pin {
+                    self.save();
+                }
+                task
+            }
+            Message::MenuPick(msg) => match self.menu.take() {
+                Some(menu) => self.update(Message::Tab(menu.tab, msg)),
+                None => Task::none(),
+            },
+            Message::MenuHover(index) => {
+                if let Some(menu) = self.menu.as_mut() {
+                    menu.open_child = index;
+                }
+                Task::none()
+            }
+            Message::CloseMenu => {
+                self.menu = None;
+                Task::none()
+            }
+            Message::WindowResized(size) => {
+                self.window_size = size;
+                Task::none()
             }
             Message::SelectTab(id) => {
                 if let Some(i) = self.index_of(id) {
@@ -227,7 +279,7 @@ impl App {
 
             Message::WindowReady(id) => {
                 self.window = id;
-                Task::none()
+                self.with_window(|id| window::size(id).map(Message::WindowResized))
             }
             Message::DragWindow => self.with_window(window::drag),
             Message::ResizeWindow(direction) => self.with_window(|id| window::drag_resize(id, direction)),
@@ -258,9 +310,9 @@ impl App {
                 }
                 Task::none()
             }
-            Message::AvatarLoaded(email, bytes) => {
-                let found = bytes.is_some();
-                self.avatars.loaded(email, bytes);
+            Message::AvatarLoaded(email, picture) => {
+                let found = picture.is_some();
+                self.avatars.loaded(email, picture);
                 if found {
                     for tab in &self.tabs {
                         tab.ws.graph_cache.clear();
@@ -269,6 +321,12 @@ impl App {
                 Task::none()
             }
 
+            Message::Key(key, _, _) if self.menu.is_some() => {
+                if key == Key::Named(keyboard::key::Named::Escape) {
+                    self.menu = None;
+                }
+                Task::none()
+            }
             Message::Key(key, _, _) if self.theme_picker => {
                 if key == Key::Named(keyboard::key::Named::Escape) {
                     self.theme_picker = false;
@@ -279,11 +337,6 @@ impl App {
                 Some(id) => self.forward(id, WsMessage::Key(key, mods, text)),
                 None => Task::none(),
             },
-            Message::Tick(now) => {
-                let running: Vec<TabId> =
-                    self.tabs.iter().filter(|t| t.ws.session_running()).map(|t| t.id).collect();
-                Task::batch(running.into_iter().map(|id| self.forward(id, WsMessage::Tick(now))))
-            }
             Message::DismissError => {
                 self.error = None;
                 Task::none()
@@ -300,7 +353,7 @@ impl App {
         };
         Task::batch(emails.into_iter().map(|email| {
             let key = email.clone();
-            Task::perform(blocking(move || Ok(avatars::fetch(&key))), move |r: Result<_, String>| {
+            Task::perform(blocking(move || Ok(avatars::fetch(&key).and_then(|b| avatars::circular(&b)))), move |r: Result<_, String>| {
                 Message::AvatarLoaded(email.clone(), r.ok().flatten())
             })
         }))
@@ -318,7 +371,8 @@ impl App {
         }
         let id = self.next_id;
         self.next_id += 1;
-        let (ws, task) = Workspace::new(path, self.tools.clone());
+        let pinned = self.pinned.iter().find(|(p, _)| same_dir(p, &path)).map(|(_, b)| b.clone());
+        let (ws, task) = Workspace::new(path, self.tools.clone(), pinned);
         self.tabs.push(Tab { id, ws });
         self.active = self.tabs.len() - 1;
         task.map(move |m| Message::Tab(id, m))
@@ -332,13 +386,30 @@ impl App {
         self.window.map_or_else(Task::none, f)
     }
 
+    /// Saved pins merged with the current tabs' pins.
+    fn pinned_map(&mut self) -> HashMap<String, String> {
+        for tab in &self.tabs {
+            match &tab.ws.pinned {
+                Some(b) => {
+                    self.pinned.insert(tab.ws.path.clone(), b.clone());
+                }
+                None => {
+                    self.pinned.remove(&tab.ws.path);
+                }
+            }
+        }
+        self.pinned.iter().map(|(k, v)| (k.display().to_string(), v.clone())).collect()
+    }
+
     fn save(&mut self) {
+        let pinned = self.pinned_map();
         let Some(file) = &self.state_file else { return };
         let saved = Saved {
             tabs: self.tabs.iter().map(|t| t.ws.path.clone()).collect(),
             active: self.active,
             layout: self.layout.clone(),
             theme: style::p().name.to_owned(),
+            pinned,
         };
         if let Err(e) = persist::save(file, &saved) {
             self.error = Some(format!("Não foi possível salvar o estado: {e}"));

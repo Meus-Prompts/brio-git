@@ -43,7 +43,7 @@ pub fn watch(workdir: &Path, git_dir: &Path) -> anyhow::Result<(WatchHandle, Unb
     }
 
     let (tx, rx) = unbounded();
-    std::thread::Builder::new().name("lazygit-watcher".into()).spawn(move || {
+    std::thread::Builder::new().name("brio-watcher".into()).spawn(move || {
         let mut batch = ChangeBatch::default();
         let mut first: Option<Instant> = None;
         loop {
@@ -113,7 +113,7 @@ mod tests {
         assert!(is_git_state(Path::new("index")));
         assert!(!is_git_state(Path::new("index.lock")));
         assert!(!is_git_state(Path::new("objects/ab/cdef")));
-        assert!(!is_git_state(Path::new("lazygit-index-1-2")));
+        assert!(!is_git_state(Path::new("brio-index-1-2")));
     }
 
     #[test]

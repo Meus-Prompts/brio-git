@@ -1,5 +1,6 @@
 //! Saved state between runs: open tabs and panel layout.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -13,16 +14,18 @@ pub struct Saved {
     pub active: usize,
     pub layout: Layout,
     pub theme: String,
+    /// Work tree path -> branch pinned to the left of the graph.
+    pub pinned: HashMap<String, String>,
 }
 
 impl Default for Saved {
     fn default() -> Self {
-        Self { tabs: Vec::new(), active: 0, layout: Layout::default(), theme: "Dark".into() }
+        Self { tabs: Vec::new(), active: 0, layout: Layout::default(), theme: "Dark".into(), pinned: HashMap::new() }
     }
 }
 
 pub fn default_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("lazy-git").join("state.json"))
+    dirs::config_dir().map(|d| d.join("brio-git").join("state.json"))
 }
 
 /// Loads saved state; a missing or broken file yields the defaults.
@@ -56,7 +59,8 @@ mod tests {
 
         let mut layout = Layout::default();
         layout.set_visible(PaneKind::Sidebar, false);
-        let saved = Saved { tabs: vec!["/a".into(), "/b".into()], active: 1, layout, theme: "Nord".into() };
+        let pinned = HashMap::from([("/a".to_owned(), "main".to_owned())]);
+        let saved = Saved { tabs: vec!["/a".into(), "/b".into()], active: 1, layout, theme: "Nord".into(), pinned };
         save(&path, &saved).unwrap();
         assert_eq!(load(&path), saved);
 

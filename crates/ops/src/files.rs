@@ -55,6 +55,11 @@ pub fn changed(git: &Git, from: Option<&str>, to: &str) -> Result<Vec<FileChange
     Ok(parse_name_status(&git.run(&args)?))
 }
 
+/// Files that differ between `from` and the working tree (tracked files only).
+pub fn changed_to_worktree(git: &Git, from: &str) -> Result<Vec<FileChange>> {
+    Ok(parse_name_status(&git.run(&["diff", "-z", "-M", "--name-status", from])?))
+}
+
 fn parse_name_status(out: &str) -> Vec<FileChange> {
     let mut fields = out.split('\0').filter(|f| !f.is_empty());
     let mut changes = Vec::new();
@@ -73,7 +78,7 @@ fn parse_name_status(out: &str) -> Vec<FileChange> {
             (None, fields.next())
         };
         if let Some(path) = path {
-            changes.push(FileChange { path: path.to_owned(), from, kind, staged: false });
+            changes.push(FileChange { path: path.to_owned(), from, kind, staged: false, unstaged: false });
         }
     }
     changes

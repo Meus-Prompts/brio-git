@@ -8,7 +8,7 @@ use iced::widget::{
 };
 use iced::window::Direction;
 use iced::{Alignment, Color, Element, Fill, Font, Length};
-use lazygit_core::RefKind;
+use brio_core::RefKind;
 
 use crate::app::{App, Message, TabId};
 use crate::data::RepoData;
@@ -19,7 +19,9 @@ use crate::widgets::graph::GraphView;
 use crate::widgets::terminal::TerminalView;
 use crate::avatars::Avatars;
 use crate::workspace::{GRAPH_SCROLL, Selection, Workspace, WsMessage};
-use crate::{view_details, view_file};
+use crate::actions::Op;
+use crate::menu::Target;
+use crate::{view_details, view_file, view_overlay};
 
 const EDGE: f32 = 5.0;
 
@@ -27,6 +29,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let mut layout = column![title_bar(app)];
     if let Some(tab) = app.tabs.get(app.active) {
         layout = layout.push(toolbar(app, tab.id, &tab.ws));
+        if let Some(b) = conflict_banner(tab.id, &tab.ws) {
+            layout = layout.push(b);
+        }
         if let Some(b) = banner(tab.ws.error.as_deref(), tab.ws.notice.as_deref()) {
             layout = layout.push(b.map(move |m| Message::Tab(tab.id, m)));
         }
@@ -41,7 +46,21 @@ pub fn view(app: &App) -> Element<'_, Message> {
     layout = layout.push(body(app));
 
     let framed: Element<_> = container(layout).style(style::root).width(Fill).height(Fill).into();
-    let framed = if app.theme_picker { stack![framed, theme_picker()].into() } else { framed };
+    let mut layers = stack![framed];
+    if let Some(tab) = app.tabs.get(app.active)
+        && let Some(d) = &tab.ws.dialog
+    {
+        layers = layers.push(view_overlay::dialog(tab.id, d));
+    }
+    if app.theme_picker {
+        layers = layers.push(theme_picker());
+    }
+    if let Some(menu) = &app.menu {
+        layers = layers.push(view_overlay::context_menu(app, menu));
+    }
+    // Topmost and invisible: remembers where the cursor is for the menus.
+    layers = layers.push(view_overlay::cursor_tracker(app));
+    let framed: Element<_> = layers.into();
     if app.maximized { framed } else { with_resize_edges(framed) }
 }
 
@@ -87,7 +106,7 @@ fn title_bar(app: &App) -> Element<'_, Message> {
 
     container(
         row![
-            text("lazy-git").size(15).color(style::p().accent),
+            text("brio-git").size(15).color(style::p().accent),
             tabs,
             drag,
             button(text("◐ Tema").size(13)).on_press(Message::OpenThemes).style(button::text).padding([4, 10]),
@@ -122,11 +141,41 @@ fn toolbar<'a>(app: &'a App, id: TabId, ws: &'a Workspace) -> Element<'a, Messag
         );
     }
 
+    let p = style::p();
+    let up = ws.repo.as_ref().and_then(|r| r.upstream.as_ref());
+    let current = ws.repo.as_ref().and_then(|r| r.current_branch().map(str::to_owned));
+    let has_changes = ws.repo.as_ref().is_some_and(|r| !r.changes.is_empty());
+    let has_stash = ws.repo.as_ref().is_some_and(|r| !r.stashes.is_empty());
+    let idle = ws.busy.is_none();
+    let tool = |label: String, op: Option<Op>| {
+        button(text(label).size(12))
+            .on_press_maybe(op.filter(|_| idle).map(|op| Message::Tab(id, WsMessage::Request(op))))
+            .style(button::secondary)
+            .padding([3, 10])
+    };
+    let pull = format!("↓ Pull{}", up.filter(|u| u.behind > 0).map(|u| format!(" {}", u.behind)).unwrap_or_default());
+    let push = format!("↑ Push{}", up.filter(|u| u.ahead > 0).map(|u| format!(" {}", u.ahead)).unwrap_or_default());
+    let net = row![
+        tool("⟳ Fetch".into(), Some(Op::Fetch)),
+        tool(pull, up.map(|_| Op::Pull)),
+        tool(push, current.clone().map(|branch| Op::Push { branch, force: false })),
+        tool("Stash".into(), has_changes.then_some(Op::StashPush)),
+        tool("Pop".into(), has_stash.then(|| Op::StashPop("stash@{0}".into()))),
+    ]
+    .spacing(4);
+
+    let status: Element<_> = match (&ws.busy, ws.loading) {
+        (Some(b), _) => text(format!("⏳ {b}")).size(12).color(p.warn).into(),
+        (None, true) => text("atualizando…").size(12).color(p.muted).into(),
+        (None, false) => text(up.map(|u| format!("↔ {}", u.name)).unwrap_or_default()).size(12).color(p.muted).into(),
+    };
+
     container(
         row![
             text(branch.unwrap_or_default()).size(13),
             button(text("↻").size(13)).on_press(Message::Tab(id, WsMessage::Refresh)).style(button::text),
-            text(if ws.loading { "atualizando…" } else { "" }).size(12).color(style::p().muted),
+            net,
+            status,
             space::horizontal(),
             toggles,
         ]
@@ -136,6 +185,36 @@ fn toolbar<'a>(app: &'a App, id: TabId, ws: &'a Workspace) -> Element<'a, Messag
     .padding([4, 10])
     .style(style::bar)
     .into()
+}
+
+/// Shown while a merge/rebase/cherry-pick/revert waits for conflict resolution.
+fn conflict_banner(id: TabId, ws: &Workspace) -> Option<Element<'_, Message>> {
+    let op = ws.repo.as_ref()?.in_progress?;
+    let p = style::p();
+    let conflicts = ws.repo.as_ref().map_or(0, |r| r.changes.iter().filter(|c| c.kind == brio_ops::ChangeKind::Conflicted).count());
+    let msg = if conflicts > 0 {
+        format!("{} em andamento: {conflicts} arquivo(s) com conflito. Resolva, faça stage e clique em Continuar.", op.label())
+    } else {
+        format!("{} em andamento, sem conflitos pendentes.", op.label())
+    };
+    Some(
+        container(
+            row![
+                text(msg).size(13).color(p.warn).width(Fill),
+                button(text("Continuar").size(12)).on_press(Message::Tab(id, WsMessage::Request(Op::Continue(op)))).style(button::primary),
+                button(text("Abortar").size(12)).on_press(Message::Tab(id, WsMessage::Request(Op::Abort(op)))).style(button::danger),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        )
+        .padding([6, 12])
+        .style(move |_: &iced::Theme| container::Style {
+            background: Some(p.warn.scale_alpha(0.12).into()),
+            border: iced::Border { color: p.warn, width: 1.0, radius: 0.0.into() },
+            ..Default::default()
+        })
+        .into(),
+    )
 }
 
 fn banner<'a>(error: Option<&'a str>, notice: Option<&'a str>) -> Option<Element<'a, WsMessage>> {
@@ -274,13 +353,40 @@ fn sidebar<'a>(ws: &'a Workspace, repo: &'a RepoData) -> Element<'a, WsMessage> 
                 .on_press(WsMessage::JumpToCommit(r.target.clone()))
                 .padding([3, 14])
                 .width(Fill);
-            list = list.push(if is_head {
-                item.style(current_branch)
-            } else {
-                item.style(if selected { button::secondary } else { button::text })
-            });
+            let item = if is_head { item.style(current_branch) } else { item.style(if selected { button::secondary } else { button::text }) };
+            let target = match kind {
+                RefKind::Tag => Target::Tag(r.name.clone()),
+                RefKind::LocalBranch => Target::Branch { name: r.name.clone(), remote: false },
+                RefKind::RemoteBranch => Target::Branch { name: r.name.clone(), remote: true },
+            };
+            list = list.push(mouse_area(item).on_right_press(WsMessage::OpenMenu(target)));
         }
         list = list.push(space().height(8));
+    }
+
+    if !repo.stashes.is_empty() {
+        let collapsed = ws.collapsed_stash;
+        list = list.push(
+            button(text(format!("{} STASHES  ({})", if collapsed { "▸" } else { "▾" }, repo.stashes.len())).size(11).color(style::p().muted))
+                .on_press(WsMessage::ToggleStashes)
+                .style(button::text)
+                .padding([3, 2])
+                .width(Fill),
+        );
+        if !collapsed {
+            for st in &repo.stashes {
+                let label = column![
+                    text(st.message.trim_start_matches("On ").to_owned()).size(12),
+                    text(format!("{} · {}", st.name, util::relative_time(st.time, util::now_secs()))).size(11).color(style::p().muted),
+                ];
+                let item = button(label)
+                    .on_press(WsMessage::OpenMenu(Target::Stash(st.name.clone())))
+                    .style(button::text)
+                    .padding([3, 14])
+                    .width(Fill);
+                list = list.push(mouse_area(item).on_right_press(WsMessage::OpenMenu(Target::Stash(st.name.clone()))));
+            }
+        }
     }
 
     scrollable(list.padding(8)).height(Fill).into()
@@ -318,16 +424,13 @@ fn session_panel(ws: &Workspace) -> Element<'_, WsMessage> {
             s.tool,
             s.exit_code.map(|c| format!(" (código {c})")).unwrap_or_default()
         ),
-        None => "A IA roda no diretório e na branch atuais; checkpoints são salvos automaticamente.".into(),
+        None => "A IA roda no diretório e na branch atuais.".into(),
     };
 
     let bar = row![
         pick_list(names, ws.tool.clone(), WsMessage::ToolSelected).text_size(13),
         action,
         text(status).size(12).color(style::p().muted).width(Fill),
-        button(text("◉ Checkpoint agora").size(13))
-            .on_press_maybe(ws.repo.as_ref().map(|_| WsMessage::CheckpointNow))
-            .style(button::secondary),
     ]
     .spacing(10)
     .align_y(Alignment::Center);
@@ -342,31 +445,7 @@ fn session_panel(ws: &Workspace) -> Element<'_, WsMessage> {
     .width(Fill)
     .height(Fill);
 
-    column![bar, timeline(ws), terminal].spacing(8).padding(8).into()
-}
-
-fn timeline(ws: &Workspace) -> Element<'_, WsMessage> {
-    if ws.checkpoints.is_empty() {
-        return text("Timeline: nenhum checkpoint ainda.").size(12).color(style::p().muted).into();
-    }
-    let mut items = row![text("Timeline").size(12).color(style::p().muted)].spacing(6).align_y(Alignment::Center);
-    for (i, cp) in ws.checkpoints.iter().enumerate() {
-        if i > 0 {
-            items = items.push(text("─").color(style::p().border));
-        }
-        let selected = ws.selection == Selection::Checkpoint(cp.seq);
-        items = items.push(
-            button(text(format!("#{} {} · {}", cp.seq, util::clock(cp.time), cp.label)).size(12))
-                .on_press(WsMessage::SelectCheckpoint(cp.seq))
-                .style(if selected { button::primary } else { button::secondary })
-                .padding([3, 8]),
-        );
-    }
-    scrollable(items)
-        .direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::default().width(4).scroller_width(4)))
-        .anchor_right()
-        .width(Fill)
-        .into()
+    column![bar, terminal].spacing(8).padding(8).into()
 }
 
 /// Modal grid of theme cards, each with a miniature of the app in its colors.

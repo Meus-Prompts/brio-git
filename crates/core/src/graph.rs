@@ -4,6 +4,8 @@
 //! commit. Each row says in which lane the commit dot sits and which line
 //! segments cross the row, so the renderer only has to draw straight lines.
 
+use std::collections::{HashMap, HashSet};
+
 use crate::model::Commit;
 
 /// A line segment inside one row. Lanes are column indices.
@@ -39,11 +41,20 @@ struct Lane {
 /// Computes the graph rows for `commits`, which must be ordered so that every
 /// commit comes before its parents (newest first).
 pub fn layout(commits: &[Commit]) -> Vec<GraphRow> {
+    layout_pinned(commits, None)
+}
+
+/// Like [`layout`], but keeps the first-parent line of `pinned` (a commit id,
+/// usually a branch tip) in the leftmost lane.
+pub fn layout_pinned(commits: &[Commit], pinned: Option<&str>) -> Vec<GraphRow> {
+    let chain = first_parent_chain(commits, pinned);
+    let reserve = !chain.is_empty();
     let mut lanes: Vec<Option<Lane>> = Vec::new();
     let mut next_color = 0usize;
     let mut rows = Vec::with_capacity(commits.len());
 
     for commit in commits {
+        let on_chain = chain.contains(commit.id.as_str());
         let width_before = lanes.len();
         let mut segments = Vec::new();
 
@@ -55,15 +66,24 @@ pub fn layout(commits: &[Commit]) -> Vec<GraphRow> {
             .collect();
 
         let (lane, color) = match matching.first() {
+            // The pinned line always sits in lane 0.
+            _ if on_chain && !matching.contains(&0) => {
+                if lanes.is_empty() {
+                    lanes.push(None);
+                }
+                let color = next_color;
+                next_color += 1;
+                (0, color)
+            }
             Some(&i) => (i, lanes[i].as_ref().map_or(0, |l| l.color)),
             None => {
                 let color = next_color;
                 next_color += 1;
-                (free_slot(&mut lanes), color)
+                (free_slot(&mut lanes, reserve), color)
             }
         };
 
-        if matching.is_empty() {
+        if !matching.contains(&lane) {
             // Release the slot reserved above; the parents decide who takes it.
             lanes[lane] = None;
         }
@@ -111,7 +131,7 @@ pub fn layout(commits: &[Commit]) -> Vec<GraphRow> {
                     } else {
                         let c = next_color;
                         next_color += 1;
-                        (free_slot(&mut lanes), c)
+                        (free_slot(&mut lanes, reserve), c)
                     };
                     lanes[target] = Some(Lane { expects: parent.clone(), color: c });
                     segments.push(Segment::OutOfNode { from: lane, to: target, color: c });
@@ -130,11 +150,30 @@ pub fn layout(commits: &[Commit]) -> Vec<GraphRow> {
     rows
 }
 
+/// Ids on the first-parent line starting at `tip`.
+fn first_parent_chain<'a>(commits: &'a [Commit], tip: Option<&str>) -> HashSet<&'a str> {
+    let by_id: HashMap<&str, &Commit> = commits.iter().map(|c| (c.id.as_str(), c)).collect();
+    let mut chain = HashSet::new();
+    let mut next = tip.and_then(|t| by_id.get(t).copied());
+    while let Some(c) = next {
+        if !chain.insert(c.id.as_str()) {
+            break;
+        }
+        next = c.parents.first().and_then(|p| by_id.get(p.as_str()).copied());
+    }
+    chain
+}
+
 /// Returns the first empty lane, appending one when all are taken. The slot is
 /// reserved (set to a placeholder) so a second call does not return it again.
-fn free_slot(lanes: &mut Vec<Option<Lane>>) -> usize {
+/// With `skip_first`, lane 0 is left for the pinned line.
+fn free_slot(lanes: &mut Vec<Option<Lane>>, skip_first: bool) -> usize {
     let placeholder = Some(Lane { expects: String::new(), color: 0 });
-    match lanes.iter().position(Option::is_none) {
+    let start = usize::from(skip_first);
+    while lanes.len() < start {
+        lanes.push(None);
+    }
+    match lanes.iter().skip(start).position(Option::is_none).map(|i| i + start) {
         Some(i) => {
             lanes[i] = placeholder;
             i
@@ -206,6 +245,24 @@ mod tests {
         assert!(rows.iter().all(|r| r.width <= 2));
         // m1's first parent was awaited by lane 1; that lane shifts into lane 0.
         assert!(rows[2].segments.contains(&Segment::Through { from: 1, to: 0, color: 1 }));
+    }
+
+    #[test]
+    fn pinned_branch_takes_the_first_lane() {
+        // Two branches off "base"; "x" is newer so it would normally take lane 0.
+        let commits = [c("x", &["base"]), c("y2", &["y1"]), c("y1", &["base"]), c("base", &[])];
+        assert_eq!(lanes(&layout(&commits)), vec![0, 1, 1, 0]);
+
+        let rows = layout_pinned(&commits, Some("y2"));
+        assert_eq!(lanes(&rows), vec![1, 0, 0, 0]);
+        // x's line joins the pinned line where they share a parent.
+        assert!(rows[2].segments.contains(&Segment::Through { from: 1, to: 0, color: 0 }), "{:?}", rows[2].segments);
+    }
+
+    #[test]
+    fn pinning_an_unknown_commit_changes_nothing() {
+        let commits = [c("b", &["a"]), c("a", &[])];
+        assert_eq!(layout_pinned(&commits, Some("zzz")), layout(&commits));
     }
 
     #[test]

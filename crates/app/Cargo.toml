@@ -1,13 +1,13 @@
 [package]
-name = "lazy-git"
+name = "brio-git"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-lazygit-core.workspace = true
-lazygit-ops.workspace = true
-lazygit-session.workspace = true
+brio-core.workspace = true
+brio-ops.workspace = true
+brio-session.workspace = true
 iced.workspace = true
 tokio.workspace = true
 futures.workspace = true
@@ -20,6 +20,7 @@ syntect = { version = "5", default-features = false, features = ["parsing", "reg
 two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
 ureq = "3"
 sha2 = "0.11"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 [dev-dependencies]
 tempfile.workspace = true

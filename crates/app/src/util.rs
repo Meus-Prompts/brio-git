@@ -11,18 +11,27 @@ pub async fn blocking<T: Send + 'static>(
     tokio::task::spawn_blocking(f).await.map_err(|e| e.to_string())?
 }
 
+/// Opens an `https://` URL in the default browser. No shell is involved, so
+/// characters in the URL cannot be interpreted as commands.
+pub fn open_url(url: &str) {
+    if !url.starts_with("https://") || url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    let program = "xdg-open";
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(target_os = "windows")]
+    let program = "explorer.exe";
+    let _ = std::process::Command::new(program)
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 pub fn now_secs() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
-}
-
-/// Session ids sort chronologically: `20261015-143012` (local time).
-pub fn session_id(t: i64) -> String {
-    format_in(t, &Local, "%Y%m%d-%H%M%S")
-}
-
-/// Local wall-clock time, `14:30:12`.
-pub fn clock(t: i64) -> String {
-    format_in(t, &Local, "%H:%M:%S")
 }
 
 /// Local date and time, `05/10/2026 20:41`.

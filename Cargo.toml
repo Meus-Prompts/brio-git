@@ -8,9 +8,9 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
-lazygit-core = { path = "crates/core" }
-lazygit-ops = { path = "crates/ops" }
-lazygit-session = { path = "crates/session" }
+brio-core = { path = "crates/core" }
+brio-ops = { path = "crates/ops" }
+brio-session = { path = "crates/session" }
 gix = { version = "0.89", default-features = false, features = ["revision", "sha1", "max-performance-safe"] }
 thiserror = "2"
 anyhow = "1"

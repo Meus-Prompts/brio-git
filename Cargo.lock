@@ -526,6 +526,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "brio-core"
+version = "0.1.0"
+dependencies = [
+ "gix",
+ "similar",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "brio-git"
+version = "0.1.0"
+dependencies = [
+ "brio-core",
+ "brio-ops",
+ "brio-session",
+ "chrono",
+ "dirs",
+ "futures",
+ "iced",
+ "image",
+ "rfd",
+ "serde",
+ "serde_json",
+ "sha2",
+ "syntect",
+ "tempfile",
+ "tokio",
+ "two-face",
+ "ureq",
+]
+
+[[package]]
+name = "brio-ops"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "brio-session"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "futures",
+ "notify",
+ "portable-pty",
+ "tempfile",
+]
+
+[[package]]
 name = "bstr"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3109,62 +3162,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "lazy-git"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "dirs",
- "futures",
- "iced",
- "lazygit-core",
- "lazygit-ops",
- "lazygit-session",
- "rfd",
- "serde",
- "serde_json",
- "sha2",
- "syntect",
- "tempfile",
- "tokio",
- "two-face",
- "ureq",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
-
-[[package]]
-name = "lazygit-core"
-version = "0.1.0"
-dependencies = [
- "gix",
- "similar",
- "tempfile",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "lazygit-ops"
-version = "0.1.0"
-dependencies = [
- "tempfile",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "lazygit-session"
-version = "0.1.0"
-dependencies = [
- "alacritty_terminal",
- "anyhow",
- "futures",
- "notify",
- "portable-pty",
- "tempfile",
-]
 
 [[package]]
 name = "lebe"

@@ -2,7 +2,8 @@
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::io::Write;
+use std::process::{Command, Output, Stdio};
 
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
@@ -56,6 +57,21 @@ impl Git {
         checked(args, self.output(args, &[])?)
     }
 
+    /// Runs `git <args>` feeding `input` on stdin (commit messages, patches).
+    pub fn run_with_input<S: AsRef<OsStr>>(&self, args: &[S], input: &[u8]) -> Result<String> {
+        let mut child = self
+            .command(args, &[])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(input)?;
+        }
+        let stdout = checked(args, child.wait_with_output()?)?;
+        Ok(String::from_utf8_lossy(&stdout).into_owned())
+    }
+
     /// Like [`run`](Self::run) but returns `None` instead of an error when git
     /// exits with a non-zero status (useful for `rev-parse --verify`).
     pub fn try_run<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Option<String>> {
@@ -67,6 +83,10 @@ impl Git {
     }
 
     fn output<S: AsRef<OsStr>>(&self, args: &[S], env: &[(&str, &OsStr)]) -> Result<Output> {
+        Ok(self.command(args, env).output()?)
+    }
+
+    fn command<S: AsRef<OsStr>>(&self, args: &[S], env: &[(&str, &OsStr)]) -> Command {
         let mut cmd = Command::new("git");
         cmd.args(args)
             .current_dir(&self.workdir)
@@ -82,7 +102,7 @@ impl Git {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
-        Ok(cmd.output()?)
+        cmd
     }
 
     /// Resolves a path git reports (relative to the work tree) to an absolute one.

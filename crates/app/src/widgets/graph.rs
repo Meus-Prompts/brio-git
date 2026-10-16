@@ -1,16 +1,19 @@
 //! The commit graph: lanes, author avatars, ref badges, summary, hash and
 //! date, drawn on a cached canvas. Hover tooltips are drawn on top, uncached.
 
+use std::time::{Duration, Instant};
+
 use iced::advanced::image::Image;
 use iced::alignment::Vertical;
 use iced::mouse;
 use iced::widget::canvas::{self, Cache, Frame, Geometry, Path, Stroke, Text};
 use iced::widget::text::Alignment as TextAlign;
 use iced::{Color, Font, Pixels, Point, Rectangle, Renderer, Size, Theme, font};
-use lazygit_core::graph::Segment;
-use lazygit_core::{Commit, RefKind};
+use brio_core::graph::Segment;
+use brio_core::{Commit, RefKind};
 
 use crate::avatars::{self, Avatars};
+use crate::menu::Target;
 use crate::data::RepoData;
 use crate::style;
 use crate::util;
@@ -25,6 +28,11 @@ const TEXT_SIZE: f32 = 13.0;
 const CHAR_W: f32 = 7.2;
 const HASH_W: f32 = 72.0;
 const DATE_W: f32 = 96.0;
+const BADGE_H: f32 = ROW_H - 10.0;
+/// Room taken by one local/remote icon inside a badge.
+const ICON_W: f32 = 15.0;
+const POPUP_PAD: f32 = 6.0;
+const POPUP_GAP: f32 = 5.0;
 
 pub struct GraphView<'a> {
     pub data: &'a RepoData,
@@ -34,13 +42,86 @@ pub struct GraphView<'a> {
     pub now: i64,
 }
 
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
 /// Row under the mouse and which part of it.
 #[derive(Default)]
 pub struct Hover {
     row: Option<usize>,
     on_avatar: bool,
     on_hash: bool,
+    /// Index into the row's ref groups of the badge under the mouse.
+    badge: Option<usize>,
+    /// Row whose ref groups are shown expanded (mouse over its `+N` badge).
+    expanded: Option<usize>,
     cursor: Point,
+    last_click: Option<(usize, Instant)>,
+}
+
+/// Refs sharing a name: a local branch and its remote counterparts, or a tag.
+struct Group {
+    name: String,
+    local: Option<usize>,
+    remote: Option<usize>,
+    tag: Option<usize>,
+    current: bool,
+}
+
+impl Group {
+    fn icons(&self) -> usize {
+        self.local.is_some() as usize + self.remote.is_some() as usize
+    }
+
+    fn width(&self) -> f32 {
+        let chars = self.name.chars().count() + if self.current { 2 } else { 0 };
+        let icons = self.icons() as f32 * ICON_W;
+        chars as f32 * CHAR_W + if self.current { 18.0 } else { 12.0 } + if icons > 0.0 { icons + 2.0 } else { 0.0 }
+    }
+}
+
+/// Ref groups of a row as drawn: the first group and a `+N` badge for the rest.
+struct Badges {
+    groups: Vec<Group>,
+    x: f32,
+    /// Width of the first group's badge.
+    first_w: f32,
+    /// Width of the `+N` badge, 0 when there is a single group.
+    more_w: f32,
+}
+
+impl Badges {
+    fn end(&self) -> f32 {
+        if self.groups.is_empty() {
+            self.x
+        } else if self.more_w > 0.0 {
+            self.x + self.first_w + 4.0 + self.more_w + 6.0
+        } else {
+            self.x + self.first_w + 6.0
+        }
+    }
+
+    fn contains_x(&self, x: f32) -> bool {
+        !self.groups.is_empty() && x >= self.x && x <= self.end() - 6.0
+    }
+
+    /// The expanded list drawn over row `row`: its frame and one rect per group.
+    /// It opens downwards, or upwards when it would pass `height`.
+    fn popup(&self, row: usize, height: f32) -> (Rectangle, Vec<Rectangle>) {
+        let w = self.groups.iter().map(Group::width).fold(0.0, f32::max);
+        let h = 2.0 * POPUP_PAD + self.groups.len() as f32 * (BADGE_H + POPUP_GAP) - POPUP_GAP;
+        let mut y = row as f32 * ROW_H + 5.0 - POPUP_PAD;
+        if y + h > height {
+            y = (row as f32 * ROW_H + ROW_H - 5.0 + POPUP_PAD - h).max(0.0);
+        }
+        let x = self.x - POPUP_PAD;
+        let items = (0..self.groups.len())
+            .map(|i| {
+                let top = y + POPUP_PAD + i as f32 * (BADGE_H + POPUP_GAP);
+                Rectangle::new(Point::new(x + POPUP_PAD, top), Size::new(self.groups[i].width(), BADGE_H))
+            })
+            .collect::<Vec<_>>();
+        (Rectangle::new(Point::new(x, y), Size::new(w + 2.0 * POPUP_PAD, h)), items)
+    }
 }
 
 fn lane_x(lane: usize) -> f32 {
@@ -66,18 +147,87 @@ impl GraphView<'_> {
         if self.show_date(width) { width - DATE_W - HASH_W - 8.0 } else { width - HASH_W - 4.0 }
     }
 
-    fn hit(&self, p: Point, width: f32) -> Hover {
+    /// Refs of commit `row` grouped by name, the checked-out branch first.
+    fn groups(&self, row: usize) -> Vec<Group> {
+        let data = self.data;
+        let mut groups: Vec<Group> = Vec::new();
+        for &index in data.labels.get(&data.commits[row].id).into_iter().flatten() {
+            let r = &data.refs[index];
+            let name = match r.kind {
+                RefKind::RemoteBranch => data
+                    .remotes
+                    .iter()
+                    .find_map(|remote| r.name.strip_prefix(remote.as_str())?.strip_prefix('/'))
+                    .unwrap_or(&r.name),
+                _ => &r.name,
+            };
+            let is_tag = r.kind == RefKind::Tag;
+            let pos = groups.iter().position(|g| g.name == name && g.tag.is_some() == is_tag);
+            let group = match pos {
+                Some(i) => &mut groups[i],
+                None => {
+                    groups.push(Group { name: name.to_owned(), local: None, remote: None, tag: None, current: false });
+                    groups.last_mut().unwrap()
+                }
+            };
+            match r.kind {
+                RefKind::LocalBranch => {
+                    group.local = Some(index);
+                    group.current = data.head.branch.as_deref() == Some(r.name.as_str());
+                }
+                RefKind::RemoteBranch => group.remote = group.remote.or(Some(index)),
+                RefKind::Tag => group.tag = Some(index),
+            }
+        }
+        // Stable: keeps refs order (locals, remotes, tags) after the current branch.
+        groups.sort_by_key(|g| !g.current);
+        groups
+    }
+
+    fn badges(&self, row: usize) -> Badges {
+        let groups = self.groups(row);
+        let first_w = groups.first().map_or(0.0, Group::width);
+        let more_w = if groups.len() > 1 { format!("+{}", groups.len() - 1).len() as f32 * CHAR_W + 12.0 } else { 0.0 };
+        Badges { groups, x: self.graph_width(), first_w, more_w }
+    }
+
+    /// Ref targeted by a group: the local branch when there is one.
+    fn group_target(&self, g: &Group) -> Option<Target> {
+        let r = &self.data.refs[g.local.or(g.remote).or(g.tag)?];
+        Some(match r.kind {
+            RefKind::Tag => Target::Tag(r.name.clone()),
+            kind => Target::Branch { name: r.name.clone(), remote: kind == RefKind::RemoteBranch },
+        })
+    }
+
+    /// What is under `p`; `expanded` is the row whose popup is open, which
+    /// stays open (and takes the hit) while the mouse is over it.
+    fn hit(&self, p: Point, width: f32, expanded: Option<usize>) -> Hover {
+        if let Some(row) = expanded {
+            let badges = self.badges(row);
+            let (frame, items) = badges.popup(row, self.height());
+            if frame.contains(p) {
+                let badge = items.iter().position(|r| r.contains(p));
+                return Hover { row: Some(row), badge, expanded: Some(row), cursor: p, ..Hover::default() };
+            }
+        }
         let row = (p.y / ROW_H) as usize;
         if row >= self.data.commits.len() {
             return Hover::default();
         }
         let center = Point::new(lane_x(self.data.rows[row].lane), row as f32 * ROW_H + ROW_H / 2.0);
         let hash_x = self.hash_x(width);
+        let badges = self.badges(row);
+        let on_badges = badges.contains_x(p.x);
+        let badge = (on_badges && p.x <= badges.x + badges.first_w).then_some(0);
         Hover {
             row: Some(row),
             on_avatar: center.distance(p) <= AVATAR_R + 2.0,
             on_hash: hash_x - self.graph_width() > 160.0 && p.x >= hash_x && p.x <= hash_x + HASH_W,
+            badge,
+            expanded: (on_badges && badges.groups.len() > 1).then_some(row),
             cursor: p,
+            last_click: None,
         }
     }
 }
@@ -94,21 +244,45 @@ impl canvas::Program<Message> for GraphView<'_> {
     ) -> Option<canvas::Action<Message>> {
         match event {
             canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
-                let hover = cursor.position_in(bounds).map(|p| self.hit(p, bounds.width)).unwrap_or_default();
-                let changed = hover.row != state.row || hover.on_avatar != state.on_avatar || hover.on_avatar;
+                let mut hover =
+                    cursor.position_in(bounds).map(|p| self.hit(p, bounds.width, state.expanded)).unwrap_or_default();
+                hover.last_click = state.last_click;
+                let changed = hover.row != state.row
+                    || hover.on_avatar != state.on_avatar
+                    || hover.on_avatar
+                    || hover.expanded != state.expanded
+                    || (hover.expanded.is_some() && hover.badge != state.badge);
                 *state = hover;
                 changed.then(canvas::Action::request_redraw)
             }
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let p = cursor.position_in(bounds)?;
-                let hit = self.hit(p, bounds.width);
-                let commit = &self.data.commits[hit.row?];
+                let hit = self.hit(p, bounds.width, state.expanded);
+                let row = hit.row?;
+                let commit = &self.data.commits[row];
+                let now = Instant::now();
+                let double = state.last_click.is_some_and(|(r, t)| r == row && now.duration_since(t) < DOUBLE_CLICK);
+                state.last_click = if double { None } else { Some((row, now)) };
                 let msg = if hit.on_hash {
                     Message::CopyHash(commit.id.clone())
+                } else if double {
+                    Message::CheckoutCommit(commit.id.clone())
                 } else {
                     Message::SelectCommit(commit.id.clone())
                 };
                 Some(canvas::Action::publish(msg).and_capture())
+            }
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
+                let p = cursor.position_in(bounds)?;
+                let hit = self.hit(p, bounds.width, state.expanded);
+                let row = hit.row?;
+                let groups = self.groups(row);
+                let target = hit
+                    .badge
+                    .and_then(|i| groups.get(i))
+                    .and_then(|g| self.group_target(g))
+                    .unwrap_or_else(|| Target::Commit(self.data.commits[row].id.clone()));
+                Some(canvas::Action::publish(Message::OpenMenu(target)).and_capture())
             }
             _ => None,
         }
@@ -138,6 +312,11 @@ impl canvas::Program<Message> for GraphView<'_> {
         {
             let mut frame = Frame::new(renderer, bounds.size());
             tooltip(&mut frame, &self.data.commits[row], state.cursor, bounds.width);
+            layers.push(frame.into_geometry());
+        }
+        if let Some(row) = state.expanded {
+            let mut frame = Frame::new(renderer, bounds.size());
+            self.popup(&mut frame, row, state.badge);
             layers.push(frame.into_geometry());
         }
         layers
@@ -195,34 +374,22 @@ impl GraphView<'_> {
             let lane_color = p.lane(row.color);
             self.avatar(frame, commit, center, lane_color, is_head);
 
-            // Ref badges; the checked-out branch is filled and bold.
-            let mut x = text_x;
-            if let Some(labels) = data.labels.get(&commit.id) {
-                for &r in labels {
-                    let r = &data.refs[r];
-                    let current = r.kind == RefKind::LocalBranch && data.head.branch.as_deref() == Some(r.name.as_str());
-                    let label = if current { format!("✔ {}", r.name) } else { r.name.clone() };
-                    let badge = match r.kind {
-                        RefKind::LocalBranch => lane_color,
-                        RefKind::RemoteBranch => p.muted,
-                        RefKind::Tag => p.warn,
-                    };
-                    let w = label.chars().count() as f32 * CHAR_W + if current { 18.0 } else { 12.0 };
-                    let rect = Path::rounded_rectangle(Point::new(x, y0 + 5.0), Size::new(w, ROW_H - 10.0), 4.0.into());
-                    if current {
-                        frame.fill(&rect, p.accent);
-                        frame.fill_text(Text {
-                            font: Font { weight: font::Weight::Bold, ..Font::default() },
-                            ..text(&label, Point::new(x + 7.0, y0 + 7.0), p.bg)
-                        });
-                    } else {
-                        frame.fill(&rect, badge.scale_alpha(0.22));
-                        frame.stroke(&rect, Stroke::default().with_color(badge).with_width(1.0));
-                        frame.fill_text(text(&label, Point::new(x + 6.0, y0 + 7.0), p.text));
-                    }
-                    x += w + 6.0;
-                }
+            // Ref badges: the first group, then `+N` for the others.
+            let badges = self.badges(i);
+            if let Some(first) = badges.groups.first() {
+                let rect = Rectangle::new(Point::new(badges.x, y0 + 5.0), Size::new(badges.first_w, BADGE_H));
+                self.badge(frame, first, rect, lane_color, false);
             }
+            if badges.more_w > 0.0 {
+                let mx = badges.x + badges.first_w + 4.0;
+                let rect = Path::rounded_rectangle(Point::new(mx, y0 + 5.0), Size::new(badges.more_w, BADGE_H), 4.0.into());
+                frame.fill(&rect, p.muted.scale_alpha(0.22));
+                frame.fill_text(Text {
+                    size: Pixels(12.0),
+                    ..text(&format!("+{}", badges.groups.len() - 1), Point::new(mx + 6.0, y0 + 8.0), p.text)
+                });
+            }
+            let x = badges.end();
 
             let limit = if show_hash { hash_x } else { width };
             let summary_w = (limit - x - 12.0).max(40.0);
@@ -243,19 +410,68 @@ impl GraphView<'_> {
         }
     }
 
+    /// One ref group: name, then a computer icon (local) and a cloud (remote).
+    fn badge(&self, frame: &mut Frame, g: &Group, rect: Rectangle, lane_color: Color, hovered: bool) {
+        let p = style::p();
+        let path = Path::rounded_rectangle(rect.position(), rect.size(), 4.0.into());
+        let color = if g.tag.is_some() {
+            p.warn
+        } else if g.local.is_some() {
+            lane_color
+        } else {
+            p.muted
+        };
+        let ink = if g.current { p.bg } else { p.text };
+        if g.current {
+            frame.fill(&path, p.accent);
+        } else {
+            frame.fill(&path, color.scale_alpha(if hovered { 0.38 } else { 0.22 }));
+            frame.stroke(&path, Stroke::default().with_color(color).with_width(1.0));
+        }
+        let label = if g.current { format!("✔ {}", g.name) } else { g.name.clone() };
+        let font = if g.current { Font { weight: font::Weight::Bold, ..Font::default() } } else { Font::default() };
+        let tx = rect.x + if g.current { 7.0 } else { 6.0 };
+        frame.fill_text(Text { font, ..text(&label, Point::new(tx, rect.y + 2.0), ink) });
+
+        let mut ix = rect.x + rect.width - 4.0 - g.icons() as f32 * ICON_W;
+        let cy = rect.center_y();
+        let icon_color = if g.current { p.bg } else { p.muted };
+        if g.local.is_some() {
+            computer_icon(frame, Point::new(ix + 1.0, cy), icon_color);
+            ix += ICON_W;
+        }
+        if g.remote.is_some() {
+            cloud_icon(frame, Point::new(ix, cy), icon_color);
+        }
+    }
+
+    /// Every ref group of `row`, stacked in a panel over the graph.
+    fn popup(&self, frame: &mut Frame, row: usize, hovered: Option<usize>) {
+        let p = style::p();
+        let badges = self.badges(row);
+        let (rect, items) = badges.popup(row, self.height());
+        let path = Path::rounded_rectangle(rect.position(), rect.size(), 6.0.into());
+        frame.fill(&path, p.panel_alt);
+        frame.stroke(&path, Stroke::default().with_color(p.border).with_width(1.0));
+        let lane_color = p.lane(self.data.rows[row].color);
+        for (i, (g, r)) in badges.groups.iter().zip(items).enumerate() {
+            self.badge(frame, g, r, lane_color, hovered == Some(i));
+        }
+    }
+
+    /// Round picture (or initials) framed by a ring in the lane color.
     fn avatar(&self, frame: &mut Frame, commit: &Commit, center: Point, ring: Color, is_head: bool) {
         let p = style::p();
         if is_head {
-            frame.fill(&Path::circle(center, AVATAR_R + 4.5), p.accent.scale_alpha(0.35));
+            frame.fill(&Path::circle(center, AVATAR_R + 5.0), p.accent.scale_alpha(0.30));
         }
-        frame.fill(&Path::circle(center, AVATAR_R + 2.0), ring);
         let top_left = Point::new(center.x - AVATAR_R, center.y - AVATAR_R);
         let size = Size::new(AVATAR_R * 2.0, AVATAR_R * 2.0);
         match self.avatars.get(&commit.email) {
             Some(handle) => {
-                let mut image = Image::new(handle.clone());
-                image.border_radius = AVATAR_R.into();
-                frame.draw_image(Rectangle::new(top_left, size), image);
+                // Fill behind the picture so the lane line never shows through.
+                frame.fill(&Path::circle(center, AVATAR_R), p.panel);
+                frame.draw_image(Rectangle::new(top_left, size), Image::new(handle.clone()));
             }
             None => {
                 frame.fill(&Path::circle(center, AVATAR_R), avatars::color(&commit.email));
@@ -271,11 +487,65 @@ impl GraphView<'_> {
                 });
             }
         }
+        frame.stroke(&Path::circle(center, AVATAR_R + 1.0), Stroke::default().with_color(ring).with_width(2.5));
         if commit.parents.len() > 1 {
             // Merge commits get a small marker.
-            frame.fill(&Path::circle(Point::new(center.x + AVATAR_R - 1.0, center.y + AVATAR_R - 1.0), 3.5), ring);
+            frame.fill(&Path::circle(Point::new(center.x + AVATAR_R, center.y + AVATAR_R), 3.5), ring);
         }
     }
+}
+
+/// A monitor on a stand, ~11px wide, vertically centered on `at.y`.
+fn computer_icon(frame: &mut Frame, at: Point, color: Color) {
+    let stroke = Stroke::default().with_color(color).with_width(1.2);
+    let screen = Path::rounded_rectangle(Point::new(at.x, at.y - 5.0), Size::new(11.0, 7.5), 1.5.into());
+    frame.stroke(&screen, stroke);
+    frame.stroke(&Path::line(Point::new(at.x + 5.5, at.y + 2.5), Point::new(at.x + 5.5, at.y + 4.5)), stroke);
+    frame.stroke(&Path::line(Point::new(at.x + 2.5, at.y + 4.8), Point::new(at.x + 8.5, at.y + 4.8)), stroke);
+}
+
+/// A cloud outline, ~13px wide, vertically centered on `at.y`.
+fn cloud_icon(frame: &mut Frame, at: Point, color: Color) {
+    // Three bumps (left, top, right) over a flat base, traced as one outline.
+    let base = at.y + 4.0;
+    let left = (Point::new(at.x + 3.5, at.y + 1.0), 3.0);
+    let top = (Point::new(at.x + 7.0, at.y - 0.8), 3.6);
+    let right = (Point::new(at.x + 10.5, at.y + 1.5), 2.5);
+    let lt = upper_intersection(left, top);
+    let tr = upper_intersection(top, right);
+    let angle = |c: Point, q: Point| (q.y - c.y).atan2(q.x - c.x);
+    let tau = std::f32::consts::TAU;
+    let path = Path::new(|pb| {
+        let mut arc = |(c, r): (Point, f32), a0: f32, mut a1: f32, first: bool| {
+            while a1 < a0 {
+                a1 += tau;
+            }
+            for k in 0..=10 {
+                let a = a0 + (a1 - a0) * k as f32 / 10.0;
+                let q = Point::new(c.x + r * a.cos(), c.y + r * a.sin());
+                if first && k == 0 { pb.move_to(q) } else { pb.line_to(q) }
+            }
+        };
+        let quarter = std::f32::consts::FRAC_PI_2;
+        // Left bump: from the base (straight down) round to where it meets the top bump.
+        arc(left, quarter, angle(left.0, lt), true);
+        arc(top, angle(top.0, lt), angle(top.0, tr), false);
+        arc(right, angle(right.0, tr), quarter, false);
+        pb.line_to(Point::new(left.0.x, base));
+        pb.close();
+    });
+    frame.stroke(&path, Stroke::default().with_color(color).with_width(1.2));
+}
+
+/// The higher (smaller y) intersection point of two circles; they must overlap.
+fn upper_intersection((c1, r1): (Point, f32), (c2, r2): (Point, f32)) -> Point {
+    let (dx, dy) = (c2.x - c1.x, c2.y - c1.y);
+    let d = (dx * dx + dy * dy).sqrt();
+    let a = (r1 * r1 - r2 * r2 + d * d) / (2.0 * d);
+    let h = (r1 * r1 - a * a).max(0.0).sqrt();
+    let (mx, my) = (c1.x + a * dx / d, c1.y + a * dy / d);
+    let (p1, p2) = (Point::new(mx + h * dy / d, my - h * dx / d), Point::new(mx - h * dy / d, my + h * dx / d));
+    if p1.y < p2.y { p1 } else { p2 }
 }
 
 fn tooltip(frame: &mut Frame, commit: &Commit, cursor: Point, width: f32) {

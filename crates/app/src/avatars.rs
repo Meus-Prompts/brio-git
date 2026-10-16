@@ -48,13 +48,39 @@ impl Avatars {
         new
     }
 
-    pub fn loaded(&mut self, email: String, bytes: Option<Vec<u8>>) {
-        let avatar = match bytes {
-            Some(b) => Avatar::Image(image::Handle::from_bytes(b)),
+    pub fn loaded(&mut self, email: String, picture: Option<Picture>) {
+        let avatar = match picture {
+            Some(p) => Avatar::Image(image::Handle::from_rgba(p.size, p.size, p.pixels)),
             None => Avatar::Missing,
         };
         self.map.insert(email, avatar);
     }
+}
+
+/// A square RGBA picture already cut into a circle.
+#[derive(Debug, Clone)]
+pub struct Picture {
+    pub size: u32,
+    pub pixels: Vec<u8>,
+}
+
+/// Pixel size avatars are prepared at (crisp on HiDPI at the sizes we draw).
+const PICTURE_SIZE: u32 = 96;
+
+/// Decodes an image, crops it to a square and makes everything outside the
+/// inscribed circle transparent, with an anti-aliased edge. iced ignores
+/// rounded corners for canvas images, so the circle has to be in the pixels.
+pub fn circular(bytes: &[u8]) -> Option<Picture> {
+    let decoded = ::image::load_from_memory(bytes).ok()?;
+    let size = PICTURE_SIZE;
+    let mut rgba = decoded.resize_to_fill(size, size, ::image::imageops::FilterType::Triangle).to_rgba8();
+    let r = size as f32 / 2.0;
+    for (x, y, px) in rgba.enumerate_pixels_mut() {
+        let d = ((x as f32 + 0.5 - r).powi(2) + (y as f32 + 0.5 - r).powi(2)).sqrt();
+        let coverage = (r - d + 0.5).clamp(0.0, 1.0);
+        px[3] = (f32::from(px[3]) * coverage).round() as u8;
+    }
+    Some(Picture { size, pixels: rgba.into_raw() })
 }
 
 pub fn key(email: &str) -> String {
@@ -80,7 +106,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn cache_dir() -> Option<PathBuf> {
-    dirs::cache_dir().map(|d| d.join("lazy-git").join("avatars"))
+    dirs::cache_dir().map(|d| d.join("brio-git").join("avatars"))
 }
 
 fn agent() -> &'static ureq::Agent {
@@ -154,6 +180,23 @@ mod tests {
         assert!(a.request(["a@x.dev"]).is_empty());
         a.loaded("a@x.dev".into(), None);
         assert!(a.get("A@X.dev").is_none());
+    }
+
+    #[test]
+    fn pictures_are_cut_into_circles() {
+        let mut png = Vec::new();
+        ::image::RgbaImage::from_pixel(40, 30, ::image::Rgba([200, 10, 10, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), ::image::ImageFormat::Png)
+            .unwrap();
+        let pic = circular(&png).unwrap();
+        let alpha = |x: u32, y: u32| pic.pixels[((y * pic.size + x) * 4 + 3) as usize];
+        let mid = pic.size / 2;
+        assert_eq!(pic.pixels.len() as u32, pic.size * pic.size * 4);
+        assert_eq!(alpha(0, 0), 0, "corner is transparent");
+        assert_eq!(alpha(pic.size - 1, pic.size - 1), 0);
+        assert_eq!(alpha(mid, mid), 255, "center is opaque");
+        assert_eq!(alpha(mid, 2), 255, "top edge inside the circle");
+        assert!(circular(b"not an image").is_none());
     }
 
     #[test]

@@ -20,6 +20,8 @@ pub struct FileChange {
     pub kind: ChangeKind,
     /// Whether the change is (at least partly) staged.
     pub staged: bool,
+    /// Whether the working tree has changes not staged yet (or is untracked).
+    pub unstaged: bool,
 }
 
 impl FileChange {
@@ -65,7 +67,8 @@ pub fn parse(out: &str) -> Vec<FileChange> {
             _ => ChangeKind::Modified,
         };
         let staged = !matches!(x, ' ' | '?');
-        changes.push(FileChange { path: path.to_owned(), from, kind, staged });
+        let unstaged = y != ' ';
+        changes.push(FileChange { path: path.to_owned(), from, kind, staged, unstaged });
     }
     changes
 }
@@ -78,16 +81,16 @@ mod tests {
     fn parses_porcelain_entries() {
         let out = " M src/a.rs\0A  new.rs\0?? notes.txt\0R  b.rs\0old_b.rs\0UU conflict.rs\0 D gone.rs\0";
         let changes = parse(out);
-        let summary: Vec<_> = changes.iter().map(|c| (c.letter(), c.path.as_str(), c.staged)).collect();
+        let summary: Vec<_> = changes.iter().map(|c| (c.letter(), c.path.as_str(), c.staged, c.unstaged)).collect();
         assert_eq!(
             summary,
             vec![
-                ('M', "src/a.rs", false),
-                ('A', "new.rs", true),
-                ('?', "notes.txt", false),
-                ('R', "b.rs", true),
-                ('!', "conflict.rs", true),
-                ('D', "gone.rs", false),
+                ('M', "src/a.rs", false, true),
+                ('A', "new.rs", true, false),
+                ('?', "notes.txt", false, true),
+                ('R', "b.rs", true, false),
+                ('!', "conflict.rs", true, true),
+                ('D', "gone.rs", false, true),
             ]
         );
         assert_eq!(changes[3].from.as_deref(), Some("old_b.rs"));

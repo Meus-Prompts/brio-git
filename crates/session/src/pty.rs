@@ -41,6 +41,8 @@ pub struct TermSnapshot {
     pub cursor: Option<(usize, usize)>,
     /// Lines scrolled back into history (0 = following output).
     pub scrolled: usize,
+    /// Lines kept in the scrollback history.
+    pub history: usize,
 }
 
 impl TermSnapshot {
@@ -141,7 +143,7 @@ impl Terminal {
 
         {
             let (term, pending, tx) = (term.clone(), pending.clone(), tx.clone());
-            std::thread::Builder::new().name("lazygit-pty-reader".into()).spawn(move || {
+            std::thread::Builder::new().name("brio-pty-reader".into()).spawn(move || {
                 let mut parser: Processor = Processor::new();
                 let mut buf = [0u8; 8192];
                 loop {
@@ -157,7 +159,7 @@ impl Terminal {
                 }
             })?;
         }
-        std::thread::Builder::new().name("lazygit-pty-wait".into()).spawn(move || {
+        std::thread::Builder::new().name("brio-pty-wait".into()).spawn(move || {
             let code = child.wait().ok().map(|s| s.exit_code());
             let _ = tx.unbounded_send(TermEvent::Exited(code));
         })?;
@@ -194,9 +196,47 @@ impl Terminal {
     }
 
     /// Scrolls the view through history; positive goes back in time.
+    ///
+    /// Full-screen programs (alternate screen) have no history, so the wheel
+    /// is forwarded to them as mouse wheel reports or arrow keys instead.
     pub fn scroll(&self, lines: i32) {
-        if let Ok(mut t) = self.term.lock() {
+        if lines == 0 {
+            return;
+        }
+        let Ok(mut t) = self.term.lock() else { return };
+        let mode = *t.mode();
+        if !mode.contains(TermMode::ALT_SCREEN) {
             t.scroll_display(Scroll::Delta(lines));
+            return;
+        }
+        drop(t);
+
+        let up = lines > 0;
+        let seq: &[u8] = if mode.intersects(TermMode::MOUSE_MODE) && mode.contains(TermMode::SGR_MOUSE) {
+            if up { b"\x1b[<64;1;1M" } else { b"\x1b[<65;1;1M" }
+        } else if mode.contains(TermMode::ALTERNATE_SCROLL) {
+            match (up, mode.contains(TermMode::APP_CURSOR)) {
+                (true, true) => b"\x1bOA",
+                (true, false) => b"\x1b[A",
+                (false, true) => b"\x1bOB",
+                (false, false) => b"\x1b[B",
+            }
+        } else {
+            return;
+        };
+        if let Ok(mut w) = self.writer.lock() {
+            for _ in 0..lines.unsigned_abs() {
+                let _ = w.write_all(seq);
+            }
+            let _ = w.flush();
+        }
+    }
+
+    /// Shows the view `offset` lines back into history (0 = live output).
+    pub fn scroll_to(&self, offset: usize) {
+        if let Ok(mut t) = self.term.lock() {
+            let current = t.grid().display_offset() as i32;
+            t.scroll_display(Scroll::Delta(offset as i32 - current));
         }
     }
 
@@ -221,7 +261,7 @@ impl Terminal {
     pub fn snapshot(&self) -> TermSnapshot {
         self.pending.store(false, Ordering::SeqCst);
         let Ok(term) = self.term.lock() else {
-            return TermSnapshot { cols: 0, rows: 0, cells: Vec::new(), cursor: None, scrolled: 0 };
+            return TermSnapshot { cols: 0, rows: 0, cells: Vec::new(), cursor: None, scrolled: 0, history: 0 };
         };
         let content = term.renderable_content();
         let (cols, rows) = (term.columns(), term.screen_lines());
@@ -254,7 +294,8 @@ impl Terminal {
         let cursor = (content.mode.contains(TermMode::SHOW_CURSOR) && (0..rows as i32).contains(&cursor_row))
             .then(|| (cursor_row as usize, content.cursor.point.column.0.min(cols.saturating_sub(1))));
 
-        TermSnapshot { cols, rows, cells, cursor, scrolled: offset }
+        let history = term.grid().history_size();
+        TermSnapshot { cols, rows, cells, cursor, scrolled: offset, history }
     }
 }
 
