@@ -32,8 +32,9 @@ pub fn supports(tool: &Tool) -> bool {
     headless_args(&tool.name).is_some()
 }
 
-/// Runs `tool` in `cwd` with the staged `diff` and returns the cleaned message.
-pub fn commit_message(tool: &Tool, cwd: &Path, diff: &str) -> Result<String, String> {
+/// The command that asks `tool` for a message, and what to write to its stdin.
+/// `prompt` is the instruction (see [`PROMPT`]); the diff always follows it.
+fn command(tool: &Tool, cwd: &Path, diff: &str, prompt: &str) -> Result<(Command, String), String> {
     let (extra, prompt_as_arg) = headless_args(&tool.name)
         .ok_or_else(|| format!("{} não tem modo não interativo conhecido; escolha claude, codex ou gemini.", tool.name))?;
     let diff = truncate(diff, MAX_DIFF);
@@ -41,11 +42,17 @@ pub fn commit_message(tool: &Tool, cwd: &Path, diff: &str) -> Result<String, Str
     let mut cmd = Command::new(&tool.program);
     cmd.args(&tool.args).args(&extra).current_dir(cwd);
     let stdin = if prompt_as_arg {
-        cmd.arg(PROMPT);
+        cmd.arg(prompt);
         diff.to_owned()
     } else {
-        format!("{PROMPT}\n\n{diff}")
+        format!("{prompt}\n\n{diff}")
     };
+    Ok((cmd, stdin))
+}
+
+/// Runs `tool` in `cwd` with the staged `diff` and returns the cleaned message.
+pub fn commit_message(tool: &Tool, cwd: &Path, diff: &str, prompt: &str) -> Result<String, String> {
+    let (mut cmd, stdin) = command(tool, cwd, diff, prompt)?;
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -106,6 +113,23 @@ pub fn clean(raw: &str) -> String {
 mod tests {
     use super::*;
 
+    fn tool(name: &str) -> Tool {
+        Tool { name: name.into(), program: name.into(), args: Vec::new() }
+    }
+
+    #[test]
+    fn custom_prompt_reaches_the_command() {
+        let (cmd, stdin) = command(&tool("claude"), Path::new("."), "diff --git a b", "Só o título, em inglês.").unwrap();
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, ["-p", "Só o título, em inglês."]);
+        assert_eq!(stdin, "diff --git a b");
+
+        let (cmd, stdin) = command(&tool("codex"), Path::new("."), "diff --git a b", "Só o título.").unwrap();
+        assert_eq!(cmd.get_args().count(), 2, "exec -");
+        assert_eq!(stdin, "Só o título.\n\ndiff --git a b");
+        assert!(command(&tool("aider"), Path::new("."), "", "x").is_err());
+    }
+
     #[test]
     fn cleans_fences_and_whitespace() {
         assert_eq!(clean("\n```\nfeat: x\n\ncorpo\n```\n"), "feat: x\n\ncorpo");
@@ -122,7 +146,7 @@ mod tests {
     fn unknown_tools_are_rejected() {
         let tool = Tool { name: "aider".into(), program: "aider".into(), args: vec![] };
         assert!(!supports(&tool));
-        assert!(commit_message(&tool, Path::new("."), "diff").is_err());
+        assert!(commit_message(&tool, Path::new("."), "diff", PROMPT).is_err());
     }
 
     #[cfg(unix)]
@@ -135,7 +159,7 @@ mod tests {
         std::fs::write(&script, "#!/bin/sh\nread first\necho '```'\necho \"feat: $first\"\necho '```'\n").unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let tool = Tool { name: "claude".into(), program: script, args: vec![] };
-        let msg = commit_message(&tool, dir.path(), "adiciona login\n+x").unwrap();
+        let msg = commit_message(&tool, dir.path(), "adiciona login\n+x", PROMPT).unwrap();
         assert_eq!(msg, "feat: adiciona login");
     }
 }
