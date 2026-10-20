@@ -8,9 +8,11 @@ use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Colors;
-use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::term::{Config, Term, TermMode, viewport_to_point};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -28,6 +30,16 @@ pub struct SnapCell {
     pub fg: Rgb8,
     pub bg: Rgb8,
     pub bold: bool,
+    /// Inside the mouse selection.
+    pub selected: bool,
+}
+
+/// How a mouse selection grows: by cell, by word (double click) or by line (triple click).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectKind {
+    Cell,
+    Word,
+    Line,
 }
 
 /// What the UI needs to draw the terminal; detached from the live state.
@@ -170,8 +182,9 @@ impl Terminal {
     /// Sends input (keystrokes, pasted text) to the child.
     pub fn write(&self, bytes: &[u8]) {
         if let Ok(mut t) = self.term.lock() {
-            // Typing jumps back to the live output.
+            // Typing jumps back to the live output and drops the selection.
             t.scroll_display(Scroll::Bottom);
+            t.selection = None;
         }
         if let Ok(mut w) = self.writer.lock() {
             let _ = w.write_all(bytes);
@@ -240,6 +253,33 @@ impl Terminal {
         }
     }
 
+    /// Starts a selection at a visible cell; `right` is the half of the cell clicked.
+    pub fn select_start(&self, row: usize, col: usize, right: bool, kind: SelectKind) {
+        let Ok(mut t) = self.term.lock() else { return };
+        let point = grid_point(&t, row, col);
+        let ty = match kind {
+            SelectKind::Cell => SelectionType::Simple,
+            SelectKind::Word => SelectionType::Semantic,
+            SelectKind::Line => SelectionType::Lines,
+        };
+        t.selection = Some(Selection::new(ty, point, side(right)));
+    }
+
+    /// Moves the end of the selection to a visible cell.
+    pub fn select_to(&self, row: usize, col: usize, right: bool) {
+        let Ok(mut t) = self.term.lock() else { return };
+        let point = grid_point(&t, row, col);
+        if let Some(sel) = t.selection.as_mut() {
+            sel.update(point, side(right));
+        }
+    }
+
+    /// The selected text, `None` when nothing is selected.
+    pub fn selected_text(&self) -> Option<String> {
+        let t = self.term.lock().ok()?;
+        t.selection_to_string().filter(|s| !s.is_empty())
+    }
+
     /// Whether arrow keys must be sent in application mode (`ESC O A`).
     pub fn app_cursor(&self) -> bool {
         self.has_mode(TermMode::APP_CURSOR)
@@ -266,7 +306,7 @@ impl Terminal {
         let content = term.renderable_content();
         let (cols, rows) = (term.columns(), term.screen_lines());
         let offset = content.display_offset;
-        let blank = SnapCell { ch: ' ', fg: DEFAULT_FG, bg: DEFAULT_BG, bold: false };
+        let blank = SnapCell { ch: ' ', fg: DEFAULT_FG, bg: DEFAULT_BG, bold: false, selected: false };
         let mut cells = vec![blank; cols * rows];
 
         for indexed in content.display_iter {
@@ -287,6 +327,7 @@ impl Terminal {
                 fg,
                 bg,
                 bold: cell.flags.contains(Flags::BOLD),
+                selected: content.selection.is_some_and(|s| s.contains(indexed.point)),
             };
         }
 
@@ -303,6 +344,17 @@ impl Drop for Terminal {
     fn drop(&mut self) {
         let _ = self.killer.kill();
     }
+}
+
+/// The grid point of a visible cell, accounting for the scrollback offset.
+fn grid_point(t: &Term<Listener>, row: usize, col: usize) -> Point {
+    let row = row.min(t.screen_lines().saturating_sub(1));
+    let col = col.min(t.columns().saturating_sub(1));
+    viewport_to_point(t.grid().display_offset(), Point::new(row, Column(col)))
+}
+
+fn side(right: bool) -> Side {
+    if right { Side::Right } else { Side::Left }
 }
 
 fn notify(pending: &AtomicBool, tx: &UnboundedSender<TermEvent>) {
@@ -412,5 +464,39 @@ mod tests {
         assert!(snap.text().starts_with("hello red"), "got {:?}", snap.text());
         assert_eq!(snap.cell(0, 6).fg, palette(1));
         assert_eq!(snap.cell(0, 0).fg, DEFAULT_FG);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selects_text_with_the_mouse() {
+        let tool = Tool {
+            name: "sh".into(),
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "printf 'hello world'; sleep 5".into()],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (term, _rx) = Terminal::spawn(&tool, dir.path(), 40, 5).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !term.snapshot().text().starts_with("hello world") {
+            assert!(std::time::Instant::now() < deadline, "no output");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        // A plain click selects nothing.
+        term.select_start(0, 1, false, SelectKind::Cell);
+        assert_eq!(term.selected_text(), None);
+
+        // Drag from the left of "e" to the right of "o".
+        term.select_to(0, 4, true);
+        assert_eq!(term.selected_text().as_deref(), Some("ello"));
+        let snap = term.snapshot();
+        assert!(!snap.cell(0, 0).selected && snap.cell(0, 1).selected && snap.cell(0, 4).selected && !snap.cell(0, 5).selected);
+
+        term.select_start(0, 8, false, SelectKind::Word);
+        assert_eq!(term.selected_text().as_deref(), Some("world"));
+
+        // Typing drops the selection.
+        term.write(b"x");
+        assert_eq!(term.selected_text(), None);
     }
 }

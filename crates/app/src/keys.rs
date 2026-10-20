@@ -9,6 +9,12 @@ pub fn is_paste(key: &Key, mods: Modifiers) -> bool {
     v && ((mods.control() && mods.shift()) || (mods.logo() && !mods.control()))
 }
 
+/// Whether this key press is the copy shortcut (Ctrl+Shift+C, or Cmd+C on macOS).
+pub fn is_copy(key: &Key, mods: Modifiers) -> bool {
+    let c = matches!(key, Key::Character(c) if c.eq_ignore_ascii_case("c"));
+    c && ((mods.control() && mods.shift()) || (mods.logo() && !mods.control()))
+}
+
 /// Encodes a key press, or `None` when the terminal should ignore it.
 pub fn encode(key: &Key, mods: Modifiers, text: Option<&str>, app_cursor: bool) -> Option<Vec<u8>> {
     if let Key::Named(named) = key {

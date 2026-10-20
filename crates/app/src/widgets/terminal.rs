@@ -1,9 +1,10 @@
 //! Draws a [`TermSnapshot`] and turns mouse input into terminal messages.
 
+use iced::advanced::mouse::{Click, click};
 use iced::mouse;
 use iced::widget::canvas::{self, Cache, Geometry, Path, Stroke, Text};
 use iced::{Color, Font, Pixels, Point, Rectangle, Renderer, Size, Theme};
-use brio_session::TermSnapshot;
+use brio_session::{SelectKind, TermSnapshot};
 use brio_session::pty::{DEFAULT_BG, DEFAULT_FG};
 
 use crate::workspace::WsMessage as Message;
@@ -35,12 +36,26 @@ pub struct ViewState {
     wheel: f32,
     /// Whether the scrollbar thumb is being dragged.
     dragging: bool,
+    /// Whether a text selection is being dragged.
+    selecting: bool,
+    /// Cell (row, col, right half) the selection last reached, to publish only changes.
+    select_end: Option<(usize, usize, bool)>,
+    /// Previous click, to tell double and triple clicks apart.
+    last_click: Option<Click>,
 }
 
 pub fn grid_size(bounds: Size) -> (u16, u16) {
     let cols = ((bounds.width - 2.0 * PAD - SCROLLBAR_W) / CELL_W).floor().max(2.0) as u16;
     let rows = ((bounds.height - 2.0 * PAD) / CELL_H).floor().max(2.0) as u16;
     (cols, rows)
+}
+
+/// The cell under `p` (relative to the widget) and whether `p` is on its right half.
+fn cell_at(p: Point, snap: &TermSnapshot) -> (usize, usize, bool) {
+    let x = ((p.x - PAD) / CELL_W).max(0.0);
+    let row = ((p.y - PAD) / CELL_H).max(0.0) as usize;
+    let col = x as usize;
+    (row.min(snap.rows.saturating_sub(1)), col.min(snap.cols.saturating_sub(1)), x.fract() >= 0.5 || col >= snap.cols)
 }
 
 /// Scrollbar geometry: (track, thumb) for a snapshot with history.
@@ -114,6 +129,35 @@ impl canvas::Program<Message> for TerminalView<'_> {
             canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) if state.dragging => {
                 state.dragging = false;
                 return Some(canvas::Action::request_redraw().and_capture());
+            }
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) if cursor.is_over(bounds) => {
+                let snap = self.snapshot?;
+                let position = cursor.position_in(bounds)?;
+                let click = Click::new(position, mouse::Button::Left, state.last_click);
+                state.last_click = Some(click);
+                let kind = match click.kind() {
+                    click::Kind::Single => SelectKind::Cell,
+                    click::Kind::Double => SelectKind::Word,
+                    click::Kind::Triple => SelectKind::Line,
+                };
+                let (row, col, right) = cell_at(position, snap);
+                state.selecting = true;
+                state.select_end = Some((row, col, right));
+                return Some(canvas::Action::publish(Message::TermSelect { row, col, right, kind }).and_capture());
+            }
+            canvas::Event::Mouse(mouse::Event::CursorMoved { position }) if state.selecting => {
+                let snap = self.snapshot?;
+                let end = cell_at(Point::new(position.x - bounds.x, position.y - bounds.y), snap);
+                if state.select_end == Some(end) {
+                    return Some(canvas::Action::capture());
+                }
+                state.select_end = Some(end);
+                let (row, col, right) = end;
+                return Some(canvas::Action::publish(Message::TermSelectTo { row, col, right }).and_capture());
+            }
+            canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) if state.selecting => {
+                state.selecting = false;
+                return Some(canvas::Action::publish(Message::TermSelectEnd).and_capture());
             }
             canvas::Event::Mouse(mouse::Event::ButtonPressed(_)) => {
                 let inside = cursor.is_over(bounds);
@@ -194,6 +238,23 @@ impl canvas::Program<Message> for TerminalView<'_> {
                             self::bg(bg),
                         );
                     }
+                }
+                // Selection runs, over the cell backgrounds.
+                let mut col = 0;
+                while col < snap.cols {
+                    if !snap.cell(row, col).selected {
+                        col += 1;
+                        continue;
+                    }
+                    let start = col;
+                    while col < snap.cols && snap.cell(row, col).selected {
+                        col += 1;
+                    }
+                    frame.fill_rectangle(
+                        Point::new(PAD + start as f32 * CELL_W, y),
+                        Size::new((col - start) as f32 * CELL_W, CELL_H),
+                        style::p().accent.scale_alpha(0.35),
+                    );
                 }
                 // One glyph per cell keeps columns aligned whatever the font.
                 for col in 0..snap.cols {

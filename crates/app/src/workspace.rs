@@ -15,7 +15,7 @@ use iced::widget::text_editor;
 use brio_core::RefKind;
 use brio_ops::actions::ResetMode;
 use brio_ops::undo::{self, Snapshot};
-use brio_session::{TermEvent, Terminal, Tool, WatchHandle};
+use brio_session::{SelectKind, TermEvent, Terminal, Tool, WatchHandle};
 
 use crate::actions::{CheckoutTarget, Op};
 use crate::branch_picker::{self, BranchPicker, Choice};
@@ -205,6 +205,12 @@ pub enum WsMessage {
     /// Jumps the terminal view to this many lines back into history.
     TermScrollTo(usize),
     TermFocus(bool),
+    /// Mouse press on a terminal cell: starts a selection there.
+    TermSelect { row: usize, col: usize, right: bool, kind: SelectKind },
+    /// Mouse dragged while selecting.
+    TermSelectTo { row: usize, col: usize, right: bool },
+    /// Mouse released: the selection is final.
+    TermSelectEnd,
     Key(Key, Modifiers, Option<String>),
     Paste(Option<String>),
 
@@ -288,6 +294,11 @@ impl Workspace {
     fn active_session_mut(&mut self) -> Option<&mut Session> {
         let id = self.active_session?;
         self.session_mut(id)
+    }
+
+    /// Text selected with the mouse in the active session's terminal.
+    fn selected_text(&self) -> Option<String> {
+        self.session()?.terminal.as_ref()?.selected_text()
     }
 
     /// Sessions printing output right now.
@@ -522,6 +533,35 @@ impl Workspace {
                     s.cache.clear();
                 }
                 Task::none()
+            }
+            WsMessage::TermSelect { row, col, right, kind } => {
+                self.term_focused = self.session().is_some_and(|s| s.running);
+                if let Some(s) = self.active_session_mut() {
+                    if let Some(t) = &s.terminal {
+                        t.select_start(row, col, right, kind);
+                    }
+                    s.refresh();
+                }
+                Task::none()
+            }
+            WsMessage::TermSelectTo { row, col, right } => {
+                if let Some(s) = self.active_session_mut() {
+                    if let Some(t) = &s.terminal {
+                        t.select_to(row, col, right);
+                    }
+                    s.refresh();
+                }
+                Task::none()
+            }
+            WsMessage::TermSelectEnd => match self.selected_text() {
+                // Like other Linux terminals, selecting also fills the primary selection.
+                Some(text) => iced::clipboard::write_primary(text),
+                None => Task::none(),
+            },
+            WsMessage::Key(key, mods, _) if keys::is_copy(&key, mods) && self.selected_text().is_some() => {
+                let text = self.selected_text().unwrap_or_default();
+                self.notice = Some("Seleção do terminal copiada.".into());
+                iced::clipboard::write(text)
             }
             WsMessage::Key(key, _, _) if self.branch_picker.is_some() => {
                 use iced::keyboard::key::Named;
