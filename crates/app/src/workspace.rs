@@ -44,7 +44,8 @@ pub enum Selection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialogKind {
     CreateBranch { at: String },
-    CreateTag { at: String },
+    /// `name` pre-fills the field (the branch name when made from a branch).
+    CreateTag { at: String, name: String },
     RenameBranch { old: String },
     Confirm(Op),
     /// Checkout blocked by local changes: stash them or cancel.
@@ -756,7 +757,11 @@ impl Workspace {
 
             WsMessage::OpenDialog(kind) => {
                 let check = matches!(kind, DialogKind::CreateBranch { .. });
-                self.dialog = Some(Dialog { kind, input: String::new(), input2: String::new(), check, error: None });
+                let input = match &kind {
+                    DialogKind::CreateTag { name, .. } => name.clone(),
+                    _ => String::new(),
+                };
+                self.dialog = Some(Dialog { kind, input, input2: String::new(), check, error: None });
                 iced::widget::operation::focus(DIALOG_INPUT)
             }
             WsMessage::DialogInput(v) => {
@@ -1024,7 +1029,7 @@ impl Workspace {
         }
         let op = match dialog.kind.clone() {
             DialogKind::CreateBranch { at } => Op::CreateBranch { name, at, checkout: dialog.check },
-            DialogKind::CreateTag { at } => {
+            DialogKind::CreateTag { at, .. } => {
                 let message = Some(dialog.input2.trim().to_owned()).filter(|m| !m.is_empty());
                 Op::CreateTag { name, at, message }
             }

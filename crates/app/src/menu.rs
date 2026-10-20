@@ -74,7 +74,7 @@ pub fn build(repo: &RepoData, pinned: Option<&str>, target: &Target) -> Vec<Menu
         Target::Worktree => worktree_menu(repo),
         Target::Commit(id) => commit_menu(repo, id, cur),
         Target::Branch { name, remote: false } => local_branch_menu(repo, name, current, cur, remote, pinned),
-        Target::Branch { name, remote: true } => remote_branch_menu(name, cur),
+        Target::Branch { name, remote: true } => remote_branch_menu(name, cur, pinned),
         Target::Tag(name) => tag_menu(name, remote),
         Target::Stash(name) => vec![
             op("Aplicar", Op::StashApply(name.clone())),
@@ -111,7 +111,7 @@ fn commit_menu(repo: &RepoData, id: &str, cur: &str) -> Vec<MenuItem> {
         MenuItem::new("Copiar SHA do commit", WsMessage::CopyText(id.to_owned())),
         MenuItem::new("Copiar mensagem do commit", WsMessage::CopyCommitMessage(id.to_owned())),
         MenuItem::new("Criar branch aqui…", WsMessage::OpenDialog(DialogKind::CreateBranch { at: id.to_owned() })).divided(),
-        MenuItem::new("Criar tag aqui…", WsMessage::OpenDialog(DialogKind::CreateTag { at: id.to_owned() })),
+        MenuItem::new("Criar tag aqui…", WsMessage::OpenDialog(DialogKind::CreateTag { at: id.to_owned(), name: String::new() })),
         MenuItem::new("Checkout deste commit", WsMessage::CheckoutCommit(id.to_owned())),
     ];
     let mut cherry = op("Cherry-pick", Op::CherryPick(id.to_owned())).divided();
@@ -169,8 +169,8 @@ fn local_branch_menu(
     items.push(MenuItem::new("Copiar nome da branch", WsMessage::CopyText(name.to_owned())).divided());
     items.push(MenuItem::new("Renomear…", WsMessage::OpenDialog(DialogKind::RenameBranch { old: name.to_owned() })));
     items.push(MenuItem::new("Criar branch a partir daqui…", WsMessage::OpenDialog(DialogKind::CreateBranch { at: name.to_owned() })));
-    let pin_label = if pinned == Some(name) { "Desafixar da esquerda" } else { "Fixar à esquerda" };
-    items.push(MenuItem::new(pin_label, WsMessage::TogglePin(name.to_owned())));
+    items.push(tag_from_branch(name, name));
+    items.push(pin_item(name, pinned));
     if !is_current {
         items.push(op(format!("Apagar {name}"), Op::DeleteBranch { name: name.to_owned(), force: true }).danger().divided());
     }
@@ -183,7 +183,18 @@ fn local_branch_menu(
     items
 }
 
-fn remote_branch_menu(name: &str, cur: &str) -> Vec<MenuItem> {
+/// Pins `name` (a local or remote branch) to the first lane of the graph, or unpins it.
+fn pin_item(name: &str, pinned: Option<&str>) -> MenuItem {
+    let label = if pinned == Some(name) { "Desafixar da esquerda" } else { "Fixar à esquerda" };
+    MenuItem::new(label, WsMessage::TogglePin(name.to_owned()))
+}
+
+/// "Create tag" on the tip of branch `at`, named like the branch (without the remote).
+fn tag_from_branch(at: &str, name: &str) -> MenuItem {
+    MenuItem::new("Criar tag a partir daqui…", WsMessage::OpenDialog(DialogKind::CreateTag { at: at.to_owned(), name: name.to_owned() }))
+}
+
+fn remote_branch_menu(name: &str, cur: &str, pinned: Option<&str>) -> Vec<MenuItem> {
     let (remote, branch) = name.split_once('/').unwrap_or(("origin", name));
     vec![
         MenuItem::new(format!("Checkout (cria {branch} local)"), WsMessage::Checkout(CheckoutTarget::Remote(name.to_owned()))),
@@ -193,6 +204,8 @@ fn remote_branch_menu(name: &str, cur: &str) -> Vec<MenuItem> {
         MenuItem::new(format!("Comparar {name} com {cur}"), WsMessage::Compare { from: cur.to_owned(), to: Some(name.to_owned()) }),
         MenuItem::new("Copiar nome da branch", WsMessage::CopyText(branch.to_owned())).divided(),
         MenuItem::new("Criar branch a partir daqui…", WsMessage::OpenDialog(DialogKind::CreateBranch { at: name.to_owned() })),
+        tag_from_branch(name, branch),
+        pin_item(name, pinned),
         op(format!("Apagar {branch} em {remote}"), Op::DeleteRemoteBranch { remote: remote.to_owned(), name: branch.to_owned() })
             .danger()
             .divided(),
@@ -218,4 +231,26 @@ fn tag_menu(name: &str, remote: Option<&str>) -> Vec<MenuItem> {
 /// Short label used in dialogs for a revision.
 pub fn rev_label(rev: &str) -> String {
     if rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_hexdigit()) { short(rev).to_owned() } else { rev.to_owned() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tag_dialog(item: &MenuItem) -> Option<&DialogKind> {
+        match &item.action {
+            Some(WsMessage::OpenDialog(kind @ DialogKind::CreateTag { .. })) => Some(kind),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn tag_from_a_branch_is_named_after_it() {
+        let local = tag_from_branch("feat/x", "feat/x");
+        assert_eq!(tag_dialog(&local), Some(&DialogKind::CreateTag { at: "feat/x".into(), name: "feat/x".into() }));
+
+        // A remote branch: tagged at the remote ref, named without the remote.
+        let remote = tag_from_branch("origin/feat/x", "feat/x");
+        assert_eq!(tag_dialog(&remote), Some(&DialogKind::CreateTag { at: "origin/feat/x".into(), name: "feat/x".into() }));
+    }
 }

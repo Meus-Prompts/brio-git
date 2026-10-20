@@ -115,6 +115,7 @@ pub enum Message {
     CloseSettings,
     ShowSection(Section),
     SetTheme(&'static str),
+    SetLook(style::Look),
     EditPrompt(text_editor::Action),
     ResetPrompt,
     DismissToast(u64),
@@ -143,6 +144,7 @@ impl App {
     pub fn boot(paths: Vec<PathBuf>, state_file: Option<PathBuf>) -> (Self, Task<Message>) {
         let saved = state_file.as_deref().map(persist::load).unwrap_or_default();
         style::set_theme(&saved.theme);
+        style::set_look(style::Look::from_key(&saved.look));
         let restoring = paths.is_empty();
         let paths: Vec<PathBuf> = if restoring {
             let mut tabs: Vec<PathBuf> = saved.tabs.iter().filter(|p| p.is_dir()).cloned().collect();
@@ -472,6 +474,16 @@ impl App {
                 }
                 Task::none()
             }
+            Message::SetLook(look) => {
+                if style::look() == look {
+                    return Task::none();
+                }
+                style::set_look(look);
+                self.save();
+                // Same as a theme change: every cached canvas must be redrawn.
+                let ids: Vec<TabId> = self.tabs.iter().map(|t| t.id).collect();
+                Task::batch(ids.into_iter().map(|id| self.forward(id, WsMessage::ThemeChanged)))
+            }
             Message::AvatarLoaded(email, picture) => {
                 let found = picture.is_some();
                 self.avatars.loaded(email, picture);
@@ -644,6 +656,7 @@ impl App {
             active: self.active,
             layout: self.layout.clone(),
             theme: style::p().name.to_owned(),
+            look: style::look().key().to_owned(),
             pinned,
             commit_prompt: self.commit_prompt.clone(),
             auto_update: self.auto_update,

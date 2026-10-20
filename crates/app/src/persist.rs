@@ -14,6 +14,8 @@ pub struct Saved {
     pub active: usize,
     pub layout: Layout,
     pub theme: String,
+    /// Layout style: "standard" or "minimal" (see `style::Look`).
+    pub look: String,
     /// Work tree path -> branch pinned to the left of the graph.
     pub pinned: HashMap<String, String>,
     /// Instruction for AI commit messages; empty means the built-in default.
@@ -29,6 +31,7 @@ impl Default for Saved {
             active: 0,
             layout: Layout::default(),
             theme: "Dark".into(),
+            look: "standard".into(),
             pinned: HashMap::new(),
             commit_prompt: String::new(),
             auto_update: true,
@@ -77,6 +80,7 @@ mod tests {
             active: 1,
             layout,
             theme: "Nord".into(),
+            look: "minimal".into(),
             pinned,
             commit_prompt: "Só o título, em inglês.".into(),
             auto_update: false,
@@ -97,6 +101,7 @@ mod tests {
         assert_eq!(saved.tabs, vec![PathBuf::from("/x")]);
         assert_eq!(saved.layout, Layout::default());
         assert_eq!(saved.theme, "Dark");
+        assert_eq!(saved.look, "standard", "older state files open in the standard look");
         assert_eq!(saved.commit_prompt, "", "no prompt saved: the default is used");
     }
 }

@@ -3,8 +3,11 @@
 //! The active theme is app-wide, so it lives in a global read by every view
 //! and canvas through [`p`]. [`Palette::iced_theme`] derives the iced theme
 //! used by the stock widgets (buttons, inputs) from the same colors.
+//!
+//! The layout style ([`Look`]) is global the same way: the minimal look drops
+//! frames and fills and quiets secondary text, whatever the theme.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use iced::widget::{button, container, pick_list, text_input};
 use iced::{Border, Color, Theme, color};
@@ -43,6 +46,21 @@ impl Palette {
                 danger: self.removed,
             },
         )
+    }
+
+    /// Secondary text in the minimal look: quieter than `muted`.
+    pub fn faint(&self) -> Color {
+        self.muted.scale_alpha(0.55)
+    }
+
+    /// Hairline separators in the minimal look.
+    pub fn hair(&self) -> Color {
+        self.border.scale_alpha(0.55)
+    }
+
+    /// Hover background in the minimal look.
+    pub fn wash(&self) -> Color {
+        self.text.scale_alpha(0.04)
     }
 
     /// Lane colors of the commit graph.
@@ -122,6 +140,51 @@ pub static THEMES: [Palette; 13] = [
 ];
 
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
+static MINIMAL: AtomicBool = AtomicBool::new(false);
+
+/// Layout style, independent of the color theme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Look {
+    Standard,
+    Minimal,
+}
+
+impl Look {
+    pub const ALL: [Look; 2] = [Look::Standard, Look::Minimal];
+
+    /// Name saved in the state file.
+    pub fn key(self) -> &'static str {
+        match self {
+            Look::Standard => "standard",
+            Look::Minimal => "minimal",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Look::Standard => "Padrão",
+            Look::Minimal => "Minimalista",
+        }
+    }
+
+    /// Unknown names fall back to the standard look.
+    pub fn from_key(key: &str) -> Look {
+        if key == "minimal" { Look::Minimal } else { Look::Standard }
+    }
+}
+
+pub fn look() -> Look {
+    if MINIMAL.load(Ordering::Relaxed) { Look::Minimal } else { Look::Standard }
+}
+
+pub fn set_look(look: Look) {
+    MINIMAL.store(look == Look::Minimal, Ordering::Relaxed);
+}
+
+/// Whether the minimal look is active.
+pub fn minimal() -> bool {
+    look() == Look::Minimal
+}
 
 /// The active palette.
 pub fn p() -> &'static Palette {
@@ -141,9 +204,10 @@ pub fn set_theme(name: &str) -> bool {
 
 pub fn panel(_: &Theme) -> container::Style {
     let p = p();
+    let minimal = minimal();
     container::Style {
-        background: Some(p.panel.into()),
-        border: Border { color: p.border, width: 1.0, radius: 0.0.into() },
+        background: Some(if minimal { p.bg } else { p.panel }.into()),
+        border: if minimal { Border::default() } else { Border { color: p.border, width: 1.0, radius: 0.0.into() } },
         text_color: Some(p.text),
         ..Default::default()
     }
@@ -151,9 +215,21 @@ pub fn panel(_: &Theme) -> container::Style {
 
 pub fn bar(_: &Theme) -> container::Style {
     let p = p();
+    let minimal = minimal();
     container::Style {
-        background: Some(p.panel_alt.into()),
-        border: Border { color: p.border, width: 1.0, radius: 0.0.into() },
+        background: Some(if minimal { p.bg } else { p.panel_alt }.into()),
+        border: if minimal { Border::default() } else { Border { color: p.border, width: 1.0, radius: 0.0.into() } },
+        text_color: Some(p.text),
+        ..Default::default()
+    }
+}
+
+/// A band inside a panel (the git actions atop the graph): the bar color
+/// without its frame, or nothing at all in the minimal look.
+pub fn strip(_: &Theme) -> container::Style {
+    let p = p();
+    container::Style {
+        background: (!minimal()).then(|| p.panel_alt.into()),
         text_color: Some(p.text),
         ..Default::default()
     }
@@ -164,15 +240,31 @@ pub fn root(_: &Theme) -> container::Style {
 }
 
 pub fn title_bar(_: &Theme) -> container::Style {
-    container::Style { background: Some(p().title.into()), text_color: Some(p().text), ..Default::default() }
+    let p = p();
+    container::Style { background: Some(if minimal() { p.bg } else { p.title }.into()), text_color: Some(p.text), ..Default::default() }
+}
+
+/// A 1px separator line: the border color, fainter in the minimal look.
+pub fn hairline(_: &Theme) -> container::Style {
+    let p = p();
+    container::Style { background: Some(if minimal() { p.hair() } else { p.border }.into()), ..Default::default() }
+}
+
+/// Underline marking the active tab in the minimal look.
+pub fn underline(_: &Theme) -> container::Style {
+    container::Style { background: Some(p().accent.into()), ..Default::default() }
 }
 
 pub fn tab(_: &Theme) -> container::Style {
     container::Style { border: Border { radius: 6.0.into(), ..Default::default() }, ..Default::default() }
 }
 
-pub fn tab_active(_: &Theme) -> container::Style {
+pub fn tab_active(theme: &Theme) -> container::Style {
     let p = p();
+    if minimal() {
+        // Just the underline drawn by the view.
+        return tab(theme);
+    }
     container::Style {
         background: Some(p.panel_alt.into()),
         border: Border { color: p.accent, width: 1.0, radius: 6.0.into() },
@@ -182,6 +274,9 @@ pub fn tab_active(_: &Theme) -> container::Style {
 
 pub fn pane_title(_: &Theme) -> container::Style {
     let p = p();
+    if minimal() {
+        return container::Style { text_color: Some(p.faint()), ..Default::default() };
+    }
     container::Style {
         background: Some(p.panel_alt.into()),
         border: Border { color: p.border, width: 1.0, radius: 0.0.into() },
@@ -193,10 +288,11 @@ pub fn pane_title(_: &Theme) -> container::Style {
 /// The bottom status bar.
 pub fn status_bar(_: &Theme) -> container::Style {
     let p = p();
+    let minimal = minimal();
     container::Style {
-        background: Some(p.title.into()),
-        border: Border { color: p.border, width: 1.0, radius: 0.0.into() },
-        text_color: Some(p.muted),
+        background: Some(if minimal { p.bg } else { p.title }.into()),
+        border: Border { color: if minimal { p.hair() } else { p.border }, width: 1.0, radius: 0.0.into() },
+        text_color: Some(if minimal { p.faint() } else { p.muted }),
         ..Default::default()
     }
 }
@@ -223,9 +319,10 @@ pub fn pane_toggle(open: bool) -> impl Fn(&Theme, button::Status) -> button::Sty
     move |_, status| {
         let p = p();
         let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        let (on, off) = if minimal() { (p.muted, p.faint()) } else { (p.text, p.muted.scale_alpha(0.7)) };
         button::Style {
             background: hovered.then(|| p.text.scale_alpha(0.08).into()),
-            text_color: if open { p.text } else if hovered { p.text.scale_alpha(0.8) } else { p.muted.scale_alpha(0.7) },
+            text_color: if open { on } else if hovered { p.text.scale_alpha(0.8) } else { off },
             border: Border { radius: 4.0.into(), ..Default::default() },
             ..Default::default()
         }
@@ -235,7 +332,7 @@ pub fn pane_toggle(open: bool) -> impl Fn(&Theme, button::Status) -> button::Sty
 /// Small rounded counter next to a label (commits to pull or push).
 pub fn pill(color: Color) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
-        background: Some(color.scale_alpha(0.18).into()),
+        background: (!minimal()).then(|| color.scale_alpha(0.18).into()),
         border: Border { radius: 8.0.into(), ..Default::default() },
         text_color: Some(color),
         ..Default::default()
@@ -244,7 +341,8 @@ pub fn pill(color: Color) -> impl Fn(&Theme) -> container::Style {
 
 /// Thin vertical divider between toolbar groups.
 pub fn divider(_: &Theme) -> container::Style {
-    container::Style { background: Some(p().border.into()), ..Default::default() }
+    // The minimal look groups the toolbar by spacing alone.
+    container::Style { background: (!minimal()).then(|| p().border.into()), ..Default::default() }
 }
 
 /// A filter field without its own frame, inside a popover.
@@ -302,6 +400,15 @@ pub fn chip_button(_: &Theme, status: button::Status) -> button::Style {
         button::Status::Pressed => 0.26,
         _ => 0.12,
     };
+    if minimal() {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        return button::Style {
+            background: hovered.then(|| p.wash().into()),
+            border: Border { radius: 6.0.into(), ..Default::default() },
+            text_color: p.accent,
+            ..Default::default()
+        };
+    }
     button::Style {
         background: Some(p.accent.scale_alpha(alpha).into()),
         border: Border { color: p.accent.scale_alpha(0.35), width: 1.0, radius: 6.0.into() },
@@ -313,6 +420,22 @@ pub fn chip_button(_: &Theme, status: button::Status) -> button::Style {
 /// A tinted button: faint fill and thin border in `color` (start/stop the AI session).
 pub fn soft(color: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, status| {
+        if minimal() {
+            // Muted until the mouse comes; then a faint tint of `color`.
+            let p = p();
+            let (fill, text) = match status {
+                button::Status::Active => (0.0, p.muted),
+                button::Status::Hovered => (0.1, color),
+                button::Status::Pressed => (0.16, color),
+                button::Status::Disabled => (0.0, p.faint().scale_alpha(0.6)),
+            };
+            return button::Style {
+                background: Some(color.scale_alpha(fill).into()),
+                border: Border { radius: 6.0.into(), ..Default::default() },
+                text_color: text,
+                ..Default::default()
+            };
+        }
         let (fill, border, text) = match status {
             button::Status::Active => (0.12, 0.35, color),
             button::Status::Hovered => (0.2, 0.55, color),
@@ -331,6 +454,9 @@ pub fn soft(color: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
 /// The app mark in the title bar: a rounded square with a diagonal accent gradient.
 pub fn logo(_: &Theme) -> container::Style {
     let p = p();
+    if minimal() {
+        return container::Style { text_color: Some(p.muted), ..Default::default() };
+    }
     let gradient = iced::gradient::Linear::new(iced::Radians(std::f32::consts::FRAC_PI_4 * 3.0))
         .add_stop(0.0, p.accent)
         .add_stop(1.0, p.purple);
@@ -346,12 +472,14 @@ pub fn logo(_: &Theme) -> container::Style {
 pub fn quiet_pick_list(_: &Theme, status: pick_list::Status) -> pick_list::Style {
     let p = p();
     let active = !matches!(status, pick_list::Status::Active);
+    let minimal = minimal();
+    let idle_border = if minimal { Color::TRANSPARENT } else { p.border };
     pick_list::Style {
-        text_color: p.text,
+        text_color: if minimal && !active { p.muted } else { p.text },
         placeholder_color: p.muted,
         handle_color: p.muted,
         background: if active { p.text.scale_alpha(0.06) } else { Color::TRANSPARENT }.into(),
-        border: Border { color: if active { p.accent.scale_alpha(0.5) } else { p.border }, width: 1.0, radius: 6.0.into() },
+        border: Border { color: if active { p.accent.scale_alpha(0.5) } else { idle_border }, width: 1.0, radius: 6.0.into() },
     }
 }
 
@@ -367,6 +495,68 @@ pub fn modal(_: &Theme) -> container::Style {
         border: Border { color: p.border, width: 1.0, radius: 10.0.into() },
         text_color: Some(p.text),
         ..Default::default()
+    }
+}
+
+/// Background of the embedded terminal; the window background in the minimal look.
+pub fn term_bg() -> Color {
+    let p = p();
+    if minimal() { p.bg } else { p.term_bg }
+}
+
+/// A list row that can be selected (refs, reflog, files): the stock secondary
+/// button when selected, a faint accent tint in the minimal look.
+pub fn selectable(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        if !minimal() {
+            return if selected { button::secondary(theme, status) } else { button::text(theme, status) };
+        }
+        let p = p();
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        let background = if selected {
+            Some(p.accent.scale_alpha(0.12))
+        } else {
+            hovered.then(|| p.wash())
+        };
+        button::Style {
+            background: background.map(Into::into),
+            text_color: p.text,
+            border: Border { radius: 4.0.into(), ..Default::default() },
+            ..Default::default()
+        }
+    }
+}
+
+/// A toggle-like button (working tree, list/tree): the stock primary/secondary
+/// buttons, or an accent outline when on in the minimal look.
+pub fn toggle(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        if !minimal() {
+            return if on { button::primary(theme, status) } else { button::secondary(theme, status) };
+        }
+        let p = p();
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: hovered.then(|| p.wash().into()),
+            text_color: if on { p.accent } else { p.muted },
+            border: Border { color: if on { p.accent } else { p.hair() }, width: 1.0, radius: 4.0.into() },
+            ..Default::default()
+        }
+    }
+}
+
+/// A frame for text fields: the theme default, or just a hairline in the minimal look.
+pub fn field(theme: &Theme, status: text_input::Status) -> text_input::Style {
+    let base = text_input::default(theme, status);
+    if !minimal() {
+        return base;
+    }
+    let p = p();
+    let focused = matches!(status, text_input::Status::Focused { .. });
+    text_input::Style {
+        background: Color::TRANSPARENT.into(),
+        border: Border { color: if focused { p.accent.scale_alpha(0.6) } else { p.hair() }, ..base.border },
+        ..base
     }
 }
 
@@ -394,5 +584,13 @@ mod tests {
         assert!(!set_theme("não existe"));
         assert_eq!(p().name, "Nord");
         set_theme("Dark");
+    }
+
+    #[test]
+    fn looks_round_trip_by_key() {
+        for look in Look::ALL {
+            assert_eq!(Look::from_key(look.key()), look);
+        }
+        assert_eq!(Look::from_key("glass"), Look::Standard);
     }
 }

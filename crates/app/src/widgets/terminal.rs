@@ -90,7 +90,7 @@ fn fg(c: [u8; 3]) -> Color {
 }
 
 fn bg(c: [u8; 3]) -> Color {
-    if c == DEFAULT_BG { style::p().term_bg } else { rgb(c) }
+    if c == DEFAULT_BG { style::term_bg() } else { rgb(c) }
 }
 
 impl canvas::Program<Message> for TerminalView<'_> {
@@ -208,7 +208,7 @@ impl canvas::Program<Message> for TerminalView<'_> {
     ) -> Vec<Geometry> {
         let geometry = self.cache.draw(renderer, bounds.size(), |frame| {
             let size = bounds.size();
-            frame.fill_rectangle(Point::ORIGIN, size, style::p().term_bg);
+            frame.fill_rectangle(Point::ORIGIN, size, style::term_bg());
 
             let Some(snap) = self.snapshot else {
                 frame.fill_text(Text {
@@ -311,10 +311,15 @@ impl canvas::Program<Message> for TerminalView<'_> {
         }
         if self.focused {
             let mut frame = canvas::Frame::new(renderer, bounds.size());
-            frame.stroke(
-                &Path::rectangle(Point::new(0.5, 0.5), Size::new(bounds.width - 1.0, bounds.height - 1.0)),
-                Stroke::default().with_color(style::p().accent).with_width(1.0),
-            );
+            if style::minimal() {
+                // Just a bar on the left edge.
+                frame.fill_rectangle(Point::ORIGIN, Size::new(2.0, bounds.height), style::p().accent);
+            } else {
+                frame.stroke(
+                    &Path::rectangle(Point::new(0.5, 0.5), Size::new(bounds.width - 1.0, bounds.height - 1.0)),
+                    Stroke::default().with_color(style::p().accent).with_width(1.0),
+                );
+            }
             layers.push(frame.into_geometry());
         }
         layers

@@ -32,19 +32,23 @@ pub struct RepoData {
     /// A merge/rebase/cherry-pick/revert stopped by conflicts.
     pub in_progress: Option<InProgress>,
     pub remotes: Vec<String>,
+    /// Index into `refs` of the branch pinned to the first lane.
+    pub pinned: Option<usize>,
 }
 
 impl RepoData {
-    /// Loads everything; `pinned` names a local branch kept in the first lane.
+    /// Loads everything; `pinned` names a branch kept in the first lane: a
+    /// local one, or a remote one (`origin/main`) when no local has that name.
     pub fn load(path: &Path, pinned: Option<&str>) -> Result<Self, String> {
         let repo = Repo::open(path).map_err(|e| e.to_string())?;
         let head = repo.head().map_err(|e| e.to_string())?;
         let refs = repo.refs().map_err(|e| e.to_string())?;
         let commits = repo.log(&refs, &head, LOG_LIMIT).map_err(|e| e.to_string())?;
-        let pinned_tip = pinned.and_then(|name| {
-            refs.iter().find(|r| r.kind == RefKind::LocalBranch && r.name == name).map(|r| r.target.as_str())
+        let pinned = pinned.and_then(|name| {
+            let find = |kind| refs.iter().position(|r| r.kind == kind && r.name == name);
+            find(RefKind::LocalBranch).or_else(|| find(RefKind::RemoteBranch))
         });
-        let rows = graph::layout_pinned(&commits, pinned_tip);
+        let rows = graph::layout_pinned(&commits, pinned.map(|i| refs[i].target.as_str()));
 
         let mut labels: HashMap<String, Vec<usize>> = HashMap::new();
         for (i, r) in refs.iter().enumerate() {
@@ -74,6 +78,7 @@ impl RepoData {
             reflog,
             in_progress,
             remotes,
+            pinned,
         })
     }
 
@@ -97,5 +102,36 @@ impl RepoData {
 
     pub fn commit_index(&self, id: &str) -> Option<usize> {
         self.commits.iter().position(|c| c.id == id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pins_a_local_branch_or_else_a_remote_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::new(dir.path());
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["config", "user.name", "Ana"],
+            &["config", "user.email", "ana@x.dev"],
+            &["config", "commit.gpgsign", "false"],
+            &["commit", "-q", "--allow-empty", "-m", "first"],
+            // A remote branch without a local one, and a local branch also on the remote.
+            &["update-ref", "refs/remotes/origin/feat", "HEAD"],
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        ] {
+            git.run(args).unwrap();
+        }
+        let pinned = |name: &str| {
+            let data = RepoData::load(dir.path(), Some(name)).unwrap();
+            data.pinned.map(|i| (data.refs[i].kind, data.refs[i].name.clone()))
+        };
+        assert_eq!(pinned("main"), Some((RefKind::LocalBranch, "main".into())));
+        assert_eq!(pinned("origin/feat"), Some((RefKind::RemoteBranch, "origin/feat".into())));
+        assert_eq!(pinned("origin/main"), Some((RefKind::RemoteBranch, "origin/main".into())));
+        assert_eq!(pinned("nope"), None);
     }
 }

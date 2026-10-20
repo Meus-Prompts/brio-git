@@ -33,6 +33,7 @@ pub const SEARCH: char = '\u{e155}';
 pub const BRANCH_PLUS: char = '\u{e1f4}';
 pub const CLOUD: char = '\u{e08c}';
 pub const GRIP: char = '\u{e0ed}';
+pub const PIN: char = '\u{e259}';
 pub const SETTINGS: char = '\u{e158}';
 pub const PALETTE: char = '\u{e1dd}';
 pub const RESET: char = '\u{e14c}';

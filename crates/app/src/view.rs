@@ -33,11 +33,10 @@ const EDGE: f32 = 5.0;
 
 pub fn view(app: &App) -> Element<'_, Message> {
     let mut layout = column![title_bar(app)];
-    if let Some(tab) = app.tabs.get(app.active) {
-        layout = layout.push(toolbar(tab.id, &tab.ws));
-        if let Some(b) = conflict_banner(tab.id, &tab.ws) {
-            layout = layout.push(b);
-        }
+    if let Some(tab) = app.tabs.get(app.active)
+        && let Some(b) = conflict_banner(tab.id, &tab.ws)
+    {
+        layout = layout.push(b);
     }
     layout = layout.push(body(app)).push(status_bar(app));
 
@@ -87,13 +86,10 @@ fn title_bar(app: &App) -> Element<'_, Message> {
             .on_press(Message::CloseTab(tab.id))
             .style(if confirm { button::danger } else { button::text })
             .padding([2, 6]);
-        tabs = tabs.push(
-            container(
-                row![button(label).on_press(Message::SelectTab(tab.id)).style(button::text).padding([4, 8]), close]
-                    .align_y(Alignment::Center),
-            )
-            .style(if active { style::tab_active } else { style::tab }),
-        );
+        tabs = tabs.push(tab_frame(
+            row![button(label).on_press(Message::SelectTab(tab.id)).style(button::text).padding([4, 8]), close].align_y(Alignment::Center),
+            active,
+        ));
     }
     tabs = tabs.push(
         button(text("+").size(16))
@@ -113,6 +109,7 @@ fn title_bar(app: &App) -> Element<'_, Message> {
             .padding([4, 14])
     };
 
+    let minimal = style::minimal();
     container(
         row![
             logo(),
@@ -130,7 +127,7 @@ fn title_bar(app: &App) -> Element<'_, Message> {
         .spacing(10)
         .align_y(Alignment::Center),
     )
-    .height(38)
+    .height(if minimal { 34 } else { 38 })
     .padding([0, 10])
     .style(style::title_bar)
     .into()
@@ -265,7 +262,8 @@ fn toolbar<'a>(id: TabId, ws: &'a Workspace) -> Element<'a, Message> {
     )
     .padding([5, 10])
     .width(Fill)
-    .style(style::bar)
+    .align_x(Alignment::Center)
+    .style(style::strip)
     .into()
 }
 
@@ -363,9 +361,20 @@ fn status_bar(app: &App) -> Element<'_, Message> {
 }
 
 /// `content` with a small explanation shown on hover.
-fn tip<'a>(content: impl Into<Element<'a, Message>>, label: impl Into<String>, position: tooltip::Position) -> Element<'a, Message> {
+fn tip<'a, M: 'a>(content: impl Into<Element<'a, M>>, label: impl Into<String>, position: tooltip::Position) -> Element<'a, M> {
     let label = container(text(label.into()).size(12)).padding([5, 9]).max_width(340).style(style::popover);
     tooltip(content, label, position).gap(6).into()
+}
+
+/// A tab's frame: outlined when active, or underlined in the minimal look.
+fn tab_frame<'a, M: 'a>(content: impl Into<Element<'a, M>>, active: bool) -> Element<'a, M> {
+    let frame = container(content).style(if active { style::tab_active } else { style::tab });
+    if !style::minimal() {
+        return frame.into();
+    }
+    // A stack takes its first layer's size, so the line spans just the tab.
+    let mark = container(space()).width(Fill).height(2).style(if active { style::underline } else { style::tab });
+    stack![frame, container(mark).height(Fill).align_y(iced::alignment::Vertical::Bottom)].into()
 }
 
 /// Shown while a merge/rebase/cherry-pick/revert waits for conflict resolution.
@@ -433,32 +442,56 @@ fn body(app: &App) -> Element<'_, Message> {
             PaneKind::Session => session_panel(ws),
         };
         let toggle_max = if maximized { Message::RestorePanes } else { Message::MaximizePane(pane) };
+        let minimal = style::minimal();
         let control = |glyph: char, msg: Message| button(icons::icon(glyph, 12.0)).on_press(msg).style(style::ghost).padding([3, 5]);
         let controls = row![
             control(if maximized { icons::RESTORE } else { icons::MAXIMIZE }, toggle_max),
             control(icons::CLOSE, Message::TogglePane(*kind)),
         ]
         .spacing(2);
-        let heading = row![
-            icons::icon(icons::GRIP, 11.0).color(style::p().muted.scale_alpha(0.6)),
-            icons::icon(kind.icon(), 12.0),
-            text(kind.title()).size(12),
-        ]
-        .spacing(7)
-        .align_y(Alignment::Center);
+        let grip = || icons::icon(icons::GRIP, 11.0).color(style::p().muted.scale_alpha(0.6));
+        let heading: Element<'_, Message> = if minimal {
+            // Small caps-like label; the grid shows the controls on hover, and
+            // the drag handle shows up in the room kept for it on the left.
+            let label = row![
+                space().width(11),
+                icons::icon(kind.icon(), 11.0),
+                text(kind.title().to_uppercase()).size(11),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center);
+            // Not `Fill`: the title bar hides a title that doesn't fit beside the controls.
+            let handle = container(grip()).height(Fill).align_y(iced::alignment::Vertical::Center);
+            iced::widget::hover(label, handle)
+        } else {
+            row![grip(), icons::icon(kind.icon(), 12.0), text(kind.title()).size(12)]
+                .spacing(7)
+                .align_y(Alignment::Center)
+                .into()
+        };
         let title = pane_grid::TitleBar::new(heading)
             .controls(pane_grid::Controls::new(controls))
-            .always_show_controls()
-            .padding([3, 8])
+            .padding(if minimal { [5, 12] } else { [3, 8] })
             .style(style::pane_title);
-        pane_grid::Content::new(content.map(move |m| Message::Tab(id, m)))
+        let title = if minimal { title } else { title.always_show_controls() };
+        let mut body: Element<'_, Message> = content.map(move |m| Message::Tab(id, m));
+        if *kind == PaneKind::Graph {
+            // The git actions live at the top of the graph panel.
+            let rule = container(space()).width(Fill).height(1).style(style::hairline);
+            body = column![toolbar(id, ws), rule, body].into();
+        }
+        pane_grid::Content::new(body)
             .title_bar(title)
             .style(style::panel)
     })
-    .spacing(4)
+    .spacing(if style::minimal() { 1 } else { 4 })
     .on_resize(8, Message::PaneResized)
     .on_drag(Message::PaneDragged);
 
+    if style::minimal() {
+        // Panels sit edge to edge; the 1px gaps show this hairline color.
+        return container(grid).width(Fill).height(Fill).style(style::hairline).into();
+    }
     container(grid).padding(4).width(Fill).height(Fill).into()
 }
 
@@ -504,7 +537,7 @@ fn sidebar<'a>(ws: &'a Workspace, repo: &'a RepoData) -> Element<'a, WsMessage> 
         }
         let collapsed = ws.collapsed.contains(&kind);
         list = list.push(
-            button(text(format!("{} {title}  ({})", if collapsed { "▸" } else { "▾" }, refs.len())).size(11).color(style::p().muted))
+            button(text(format!("{} {title}  ({})", if collapsed { "▸" } else { "▾" }, refs.len())).size(11).color(section_color()))
                 .on_press(WsMessage::ToggleSection(kind))
                 .style(button::text)
                 .padding([3, 2])
@@ -520,11 +553,15 @@ fn sidebar<'a>(ws: &'a Workspace, repo: &'a RepoData) -> Element<'a, WsMessage> 
                 .size(13)
                 .font(if is_head { Font { weight: iced::font::Weight::Bold, ..Font::default() } } else { Font::default() })
                 .color(if is_head { style::p().accent } else { style::p().text });
+            let mut label = row![label].spacing(6).align_y(Alignment::Center);
+            if repo.pinned.is_some_and(|i| std::ptr::eq(&repo.refs[i], r)) {
+                label = label.push(tip(icons::icon(icons::PIN, 11.0).color(style::p().muted), "Fixada à esquerda no grafo", tooltip::Position::Right));
+            }
             let item = button(label)
                 .on_press(WsMessage::JumpToCommit(r.target.clone()))
                 .padding([3, 14])
                 .width(Fill);
-            let item = if is_head { item.style(current_branch) } else { item.style(if selected { button::secondary } else { button::text }) };
+            let item = if is_head { item.style(current_branch) } else { item.style(style::selectable(selected)) };
             let target = match kind {
                 RefKind::Tag => Target::Tag(r.name.clone()),
                 RefKind::LocalBranch => Target::Branch { name: r.name.clone(), remote: false },
@@ -538,7 +575,7 @@ fn sidebar<'a>(ws: &'a Workspace, repo: &'a RepoData) -> Element<'a, WsMessage> 
     if !repo.stashes.is_empty() {
         let collapsed = ws.collapsed_stash;
         list = list.push(
-            button(text(format!("{} STASHES  ({})", if collapsed { "▸" } else { "▾" }, repo.stashes.len())).size(11).color(style::p().muted))
+            button(text(format!("{} STASHES  ({})", if collapsed { "▸" } else { "▾" }, repo.stashes.len())).size(11).color(section_color()))
                 .on_press(WsMessage::ToggleStashes)
                 .style(button::text)
                 .padding([3, 2])
@@ -582,19 +619,20 @@ fn reflog<'a>(ws: &'a Workspace, repo: &'a RepoData) -> Element<'a, WsMessage> {
             _ => p.muted,
         };
         let tag = container(text(entry.action.clone()).size(10)).padding([1, 6]).style(style::pill(color));
-        let head = row![
-            text(entry.selector.clone()).size(11).font(Font::MONOSPACE).color(p.muted),
-            text(crate::actions::short(&entry.id).to_owned()).size(11).font(Font::MONOSPACE).color(p.accent),
-            tag,
-            space::horizontal(),
-            text(util::relative_time(entry.time, now)).size(11).color(p.muted),
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center);
+        let mut head = row![].spacing(6).align_y(Alignment::Center);
+        if !style::minimal() {
+            head = head.push(text(entry.selector.clone()).size(11).font(Font::MONOSPACE).color(p.muted));
+        }
+        let head = head.extend([
+            text(crate::actions::short(&entry.id).to_owned()).size(11).font(Font::MONOSPACE).color(p.accent).into(),
+            tag.into(),
+            space::horizontal().into(),
+            text(util::relative_time(entry.time, now)).size(11).color(p.muted).into(),
+        ]);
         let message = if entry.message.is_empty() { entry.action.clone() } else { entry.message.clone() };
         let item = button(column![head, text(message).size(12).wrapping(text::Wrapping::None)].spacing(3))
             .on_press(WsMessage::SelectReflog(entry.id.clone()))
-            .style(if selected { button::secondary } else { button::text })
+            .style(style::selectable(selected))
             .padding([5, 8])
             .width(Fill);
         list = list.push(mouse_area(item).on_right_press(WsMessage::OpenMenu(Target::Commit(entry.id.clone()))));
@@ -657,10 +695,27 @@ fn session_panel(ws: &Workspace) -> Element<'_, WsMessage> {
         tabs = tabs.push(session_tab(ws, s, now, working));
     }
 
+    let icon_button = |glyph: char, color: Color, msg: Option<WsMessage>| {
+        button(icons::icon(glyph, 13.0)).on_press_maybe(msg).style(style::soft(color)).padding([6, 9])
+    };
+    let start = tip(
+        icon_button(icons::PLAY, p.accent, ws.repo.as_ref().map(|_| WsMessage::NewSession)),
+        "Nova sessão: abre outra aba com a IA escolhida, no diretório e na branch atuais",
+        tooltip::Position::Bottom,
+    );
+    let stop = tip(
+        icon_button(icons::STOP, p.removed, current.running.then_some(WsMessage::StopSession(current.id))),
+        if current.running {
+            format!("Parar: encerra {}; a saída continua visível para copiar", current.name)
+        } else {
+            "Sessão já encerrada".to_owned()
+        },
+        tooltip::Position::Bottom,
+    );
     let bar = row![
         scrollable(tabs).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(3).scroller_width(3))).width(Fill),
-        tool,
-        new("Nova sessão"),
+        tip(tool, "IA usada nas próximas sessões", tooltip::Position::Bottom),
+        row![start, stop].spacing(4),
     ]
     .spacing(10)
     .align_y(Alignment::Center);
@@ -675,12 +730,7 @@ fn session_panel(ws: &Workspace) -> Element<'_, WsMessage> {
             current.exit_code.map(|c| format!(" (código {c})")).unwrap_or_default()
         ),
     };
-    let mut info = row![text(status).size(12).color(p.muted).width(Fill)].spacing(10).align_y(Alignment::Center);
-    if current.running {
-        info = info.push(
-            button(labeled(icons::STOP, "Parar")).on_press(WsMessage::StopSession(current.id)).style(style::soft(p.removed)).padding([3, 10]),
-        );
-    }
+    let info = text(status).size(12).color(if style::minimal() { p.faint() } else { p.muted });
 
     let terminal = canvas(TerminalView {
         snapshot: current.snapshot.as_ref(),
@@ -738,7 +788,7 @@ fn session_tab<'a>(ws: &'a Workspace, s: &'a Session, now: Instant, working: usi
 
     let tab = row![mouse_area(container(label).padding([4, 8])).on_press(WsMessage::SelectSession(s.id)), close]
         .align_y(Alignment::Center);
-    container(tab).style(if active { style::tab_active } else { style::tab }).into()
+    tab_frame(tab, active)
 }
 
 /// Settings modal: a section list on the left, the section on the right.
@@ -776,7 +826,19 @@ fn settings(app: &App, section: Section) -> Element<'_, Message> {
             }
             // Thin bar against the modal edge, beside (not over) the cards.
             let bar = scrollable::Scrollbar::new().width(6).scroller_width(6).margin(0).spacing(10);
+            let mut looks = row![].spacing(8);
+            for look in style::Look::ALL {
+                looks = looks.push(
+                    button(text(look.label()).size(13))
+                        .on_press(Message::SetLook(look))
+                        .style(style::toggle(style::look() == look))
+                        .padding([5, 14]),
+                );
+            }
             column![
+                text("Estilo").size(15),
+                looks,
+                space().height(6),
                 text("Tema").size(15),
                 scrollable(grid).direction(scrollable::Direction::Vertical(bar)).height(Fill),
             ]
@@ -844,8 +906,8 @@ fn settings(app: &App, section: Section) -> Element<'_, Message> {
             .spacing(10)
             .padding(Padding { right: 10.0, ..Padding::ZERO })
             .align_y(Alignment::Center),
-            container(space()).width(Fill).height(1).style(style::divider),
-            row![nav, container(space()).width(1).height(Fill).style(style::divider), content].spacing(16).height(Fill),
+            container(space()).width(Fill).height(1).style(style::hairline),
+            row![nav, container(space()).width(1).height(Fill).style(style::hairline), content].spacing(16).height(Fill),
         ]
         .spacing(14),
     )
@@ -908,8 +970,23 @@ fn theme_card<'a>(t: &'static style::Palette, selected: bool) -> Element<'a, Mes
 }
 
 /// The checked-out branch in the sidebar: tinted background and accent edge.
+/// Color of the BRANCHES/REMOTOS/TAGS/STASHES headers.
+fn section_color() -> Color {
+    let p = style::p();
+    if style::minimal() { p.faint() } else { p.muted }
+}
+
 fn current_branch(_: &iced::Theme, status: button::Status) -> button::Style {
     let p = style::p();
+    if style::minimal() {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        return button::Style {
+            background: hovered.then(|| p.wash().into()),
+            text_color: p.accent,
+            border: iced::Border { radius: 4.0.into(), ..Default::default() },
+            ..Default::default()
+        };
+    }
     let alpha = if matches!(status, button::Status::Hovered) { 0.28 } else { 0.18 };
     button::Style {
         background: Some(p.accent.scale_alpha(alpha).into()),

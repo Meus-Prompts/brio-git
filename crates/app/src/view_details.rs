@@ -22,7 +22,7 @@ pub fn details<'a>(ws: &'a Workspace, repo: &'a RepoData, avatars: &'a Avatars) 
     let mut content = column![
         button(text(format!("Working tree ({})", repo.changes.len())).size(13))
             .on_press(WsMessage::ShowWorktree)
-            .style(if worktree { button::primary } else { button::secondary }),
+            .style(style::toggle(worktree)),
     ]
     .spacing(10);
 
@@ -35,7 +35,11 @@ pub fn details<'a>(ws: &'a Workspace, repo: &'a RepoData, avatars: &'a Avatars) 
             content = content.push(files(ws, &unstaged, old_rev, None, &title, ListMode::Unstaged));
             let title = format!("EM STAGE ({})", staged.len());
             content = content.push(files(ws, &staged, old_rev, None, &title, ListMode::Staged));
-            return column![scrollable(content.padding(10)).height(Fill), commit_box(ws)].into();
+            let mut col = column![scrollable(content.padding(10)).height(Fill)];
+            if style::minimal() {
+                col = col.push(container(space()).width(Fill).height(1).style(style::hairline));
+            }
+            return col.push(commit_box(ws)).into();
         }
         Selection::Compare { from, to } => {
             let to_label = to.as_deref().map_or("working tree".to_owned(), crate::menu::rev_label);
@@ -130,7 +134,14 @@ fn files<'a>(
     let mode = |label: &'static str, tree: bool| {
         button(text(label).size(11))
             .on_press(WsMessage::SetTreeView(tree))
-            .style(if ws.tree_view == tree { button::primary } else { button::text })
+            .style(move |t: &iced::Theme, st| match (style::minimal(), ws.tree_view == tree) {
+                (true, on) => {
+                    let p = style::p();
+                    button::Style { text_color: if on { p.text } else { p.muted }, ..button::text(t, st) }
+                }
+                (false, true) => button::primary(t, st),
+                (false, false) => button::text(t, st),
+            })
             .padding([2, 8])
     };
     let bulk = match mode_kind {
@@ -164,7 +175,7 @@ fn files<'a>(
             .spacing(4),
         )
         .on_press(WsMessage::OpenFile(target))
-        .style(if selected { button::secondary } else { button::text })
+        .style(style::selectable(selected))
         .padding([3, 6])
         .width(Fill);
         let path = vec![change.path.clone()];
@@ -211,7 +222,7 @@ fn files<'a>(
 }
 
 fn small<'a>(label: &'static str, msg: WsMessage) -> Element<'a, WsMessage> {
-    button(text(label).size(11)).on_press(msg).style(button::secondary).padding([2, 8]).into()
+    button(text(label).size(11)).on_press(msg).style(style::toggle(false)).padding([2, 8]).into()
 }
 
 fn icon<'a>(label: &'static str, msg: WsMessage) -> Element<'a, WsMessage> {
@@ -232,7 +243,7 @@ fn commit_box(ws: &Workspace) -> Element<'_, WsMessage> {
     container(
         column![
             text(if ws.amend { "ALTERAR ÚLTIMO COMMIT (AMEND)" } else { "MENSAGEM DO COMMIT" }).size(11).color(p.muted),
-            text_input("Resumo (obrigatório)", &ws.commit_summary).id(COMMIT_SUMMARY).on_input(WsMessage::CommitSummary).on_submit(WsMessage::DoCommit).padding(6),
+            text_input("Resumo (obrigatório)", &ws.commit_summary).style(style::field).id(COMMIT_SUMMARY).on_input(WsMessage::CommitSummary).on_submit(WsMessage::DoCommit).padding(6),
             text_editor(&ws.commit_body).id(COMMIT_BODY).placeholder("Descrição (opcional)").on_action(WsMessage::CommitBody).height(80).padding(6),
             row![
                 checkbox(ws.amend).label("Amend").on_toggle(WsMessage::ToggleAmend).size(14).text_size(13),

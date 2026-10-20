@@ -1,11 +1,14 @@
-//! The commit graph: lanes, author avatars, ref badges, summary, hash and
-//! date, drawn on a cached canvas ([`GraphBase`]). A second canvas stacked on
+//! The commit graph: hash, lanes, author avatars, ref badges, summary, date
+//! and author, drawn on a cached canvas ([`GraphBase`]). A second canvas stacked on
 //! top ([`GraphView`]) takes the mouse and draws tooltips and the expanded ref
 //! list. They must be separate canvases: iced draws all the text of a canvas
 //! after all its shapes, so a popup in the same canvas would let the text
 //! under it show through its background.
 //!
 //! With local changes, an "uncommitted changes" row sits above the first commit.
+//!
+//! The minimal look ([`style::minimal`]) draws shorter rows, narrower lanes and
+//! a dot per commit instead of the avatar.
 
 use std::time::{Duration, Instant};
 
@@ -26,20 +29,45 @@ use crate::style;
 use crate::util;
 use crate::workspace::WsMessage as Message;
 
-pub const ROW_H: f32 = 30.0;
-const LANE_W: f32 = 26.0;
 const MAX_LANES: usize = 12;
-const AVATAR_R: f32 = 10.0;
 const TEXT_SIZE: f32 = 13.0;
 /// Rough average glyph width at TEXT_SIZE, used to size badges.
 const CHAR_W: f32 = 7.2;
+/// The hash is the first column; the lanes start after it.
+const HASH_PAD: f32 = 10.0;
 const HASH_W: f32 = 72.0;
 const DATE_W: f32 = 96.0;
-const BADGE_H: f32 = ROW_H - 10.0;
+const AUTHOR_W: f32 = 130.0;
 /// Room taken by one local/remote icon inside a badge.
 const ICON_W: f32 = 15.0;
+/// Room taken by the tag icon, left of a tag's name.
+const TAG_ICON_W: f32 = 14.0;
+/// Room taken by the pin icon of the pinned branch, left of its name.
+const PIN_W: f32 = 13.0;
 const POPUP_PAD: f32 = 6.0;
 const POPUP_GAP: f32 = 5.0;
+
+fn row_h() -> f32 {
+    if style::minimal() { 26.0 } else { 30.0 }
+}
+
+fn lane_w() -> f32 {
+    if style::minimal() { 16.0 } else { 26.0 }
+}
+
+/// Radius of a commit node: the avatar, or the dot in the minimal look.
+fn node_r() -> f32 {
+    if style::minimal() { 4.0 } else { 10.0 }
+}
+
+fn badge_h() -> f32 {
+    row_h() - if style::minimal() { 8.0 } else { 10.0 }
+}
+
+/// Top of the text in a row starting at `y0`.
+fn text_y(y0: f32) -> f32 {
+    y0 + (row_h() - 16.0) / 2.0
+}
 
 #[derive(Clone, Copy)]
 pub struct GraphView<'a> {
@@ -78,17 +106,45 @@ struct Group {
     remote: Option<usize>,
     tag: Option<usize>,
     current: bool,
+    /// One of its refs is pinned to the first lane.
+    pinned: bool,
 }
 
 impl Group {
+    /// Local/remote icons drawn at the end of the badge.
     fn icons(&self) -> usize {
         self.local.is_some() as usize + self.remote.is_some() as usize
+    }
+
+    /// Offset of the name: the pin and tag icons come first, in both looks.
+    fn name_x(&self) -> f32 {
+        (if self.pinned { PIN_W } else { 0.0 }) + if self.tag.is_some() { TAG_ICON_W } else { 0.0 }
+    }
+
+    /// Draws the pin and tag icons at the start of `rect`, in `color`.
+    fn lead_icons(&self, frame: &mut Frame, rect: Rectangle, color: Color) {
+        let mut x = rect.x + 5.0;
+        if self.pinned {
+            frame.fill_text(Text {
+                content: icons::PIN.to_string(),
+                position: Point::new(x, rect.center_y()),
+                color,
+                size: Pixels(11.0),
+                font: icons::FONT,
+                align_y: Vertical::Center,
+                ..Text::default()
+            });
+            x += PIN_W;
+        }
+        if self.tag.is_some() {
+            tag_icon(frame, Point::new(x, rect.center_y()), color);
+        }
     }
 
     fn width(&self) -> f32 {
         let chars = self.name.chars().count() + if self.current { 2 } else { 0 };
         let icons = self.icons() as f32 * ICON_W;
-        chars as f32 * CHAR_W + if self.current { 18.0 } else { 12.0 } + if icons > 0.0 { icons + 2.0 } else { 0.0 }
+        chars as f32 * CHAR_W + if self.current { 18.0 } else { 12.0 } + if icons > 0.0 { icons + 2.0 } else { 0.0 } + self.name_x()
     }
 }
 
@@ -121,16 +177,17 @@ impl Badges {
     /// It opens downwards, or upwards when it would pass `height`.
     fn popup(&self, row: usize, height: f32) -> (Rectangle, Vec<Rectangle>) {
         let w = self.groups.iter().map(Group::width).fold(0.0, f32::max);
-        let h = 2.0 * POPUP_PAD + self.groups.len() as f32 * (BADGE_H + POPUP_GAP) - POPUP_GAP;
-        let mut y = row as f32 * ROW_H + 5.0 - POPUP_PAD;
+        let (row_h, badge_h) = (row_h(), badge_h());
+        let h = 2.0 * POPUP_PAD + self.groups.len() as f32 * (badge_h + POPUP_GAP) - POPUP_GAP;
+        let mut y = row as f32 * row_h + 5.0 - POPUP_PAD;
         if y + h > height {
-            y = (row as f32 * ROW_H + ROW_H - 5.0 + POPUP_PAD - h).max(0.0);
+            y = (row as f32 * row_h + row_h - 5.0 + POPUP_PAD - h).max(0.0);
         }
         let x = self.x - POPUP_PAD;
         let items = (0..self.groups.len())
             .map(|i| {
-                let top = y + POPUP_PAD + i as f32 * (BADGE_H + POPUP_GAP);
-                Rectangle::new(Point::new(x + POPUP_PAD, top), Size::new(self.groups[i].width(), BADGE_H))
+                let top = y + POPUP_PAD + i as f32 * (badge_h + POPUP_GAP);
+                Rectangle::new(Point::new(x + POPUP_PAD, top), Size::new(self.groups[i].width(), badge_h))
             })
             .collect::<Vec<_>>();
         (Rectangle::new(Point::new(x, y), Size::new(w + 2.0 * POPUP_PAD, h)), items)
@@ -139,7 +196,7 @@ impl Badges {
 
 /// Top of commit `row` on screen, below the uncommitted-changes row if any.
 pub fn row_top(data: &RepoData, row: usize) -> f32 {
-    (row + wip_rows(data)) as f32 * ROW_H
+    (row + wip_rows(data)) as f32 * row_h()
 }
 
 /// Rows drawn above the first commit: 1 when the working tree has changes.
@@ -148,12 +205,12 @@ fn wip_rows(data: &RepoData) -> usize {
 }
 
 fn lane_x(lane: usize) -> f32 {
-    14.0 + lane as f32 * LANE_W
+    HASH_PAD + HASH_W + 14.0 + lane as f32 * lane_w()
 }
 
 impl GraphView<'_> {
     pub fn height(&self) -> f32 {
-        (self.data.commits.len() + wip_rows(self.data)).max(1) as f32 * ROW_H
+        (self.data.commits.len() + wip_rows(self.data)).max(1) as f32 * row_h()
     }
 
     fn top(&self, row: usize) -> f32 {
@@ -162,16 +219,16 @@ impl GraphView<'_> {
 
     fn graph_width(&self) -> f32 {
         let lanes = self.data.rows.iter().map(|r| r.width).max().unwrap_or(1).min(MAX_LANES);
-        lanes as f32 * LANE_W + 14.0
+        HASH_PAD + HASH_W + lanes as f32 * lane_w() + 14.0
     }
 
-    /// Whether the date column fits; the hash column is kept longer.
-    fn show_date(&self, width: f32) -> bool {
-        width - self.graph_width() > 520.0
-    }
-
-    fn hash_x(&self, width: f32) -> f32 {
-        if self.show_date(width) { width - DATE_W - HASH_W - 8.0 } else { width - HASH_W - 4.0 }
+    /// Left edges of the date and author columns, each when it fits: the
+    /// author goes first when the panel gets narrow.
+    fn columns(&self, width: f32) -> (Option<f32>, Option<f32>) {
+        let room = width - self.graph_width();
+        let author = (room > 660.0).then_some(width - AUTHOR_W);
+        let date = (room > 520.0).then(|| author.unwrap_or(width) - DATE_W);
+        (date, author)
     }
 
     /// Refs of commit `row` grouped by name, the checked-out branch first.
@@ -193,10 +250,11 @@ impl GraphView<'_> {
             let group = match pos {
                 Some(i) => &mut groups[i],
                 None => {
-                    groups.push(Group { name: name.to_owned(), local: None, remote: None, tag: None, current: false });
+                    groups.push(Group { name: name.to_owned(), local: None, remote: None, tag: None, current: false, pinned: false });
                     groups.last_mut().unwrap()
                 }
             };
+            group.pinned |= data.pinned == Some(index);
             match r.kind {
                 RefKind::LocalBranch => {
                     group.local = Some(index);
@@ -229,7 +287,7 @@ impl GraphView<'_> {
 
     /// What is under `p`; `expanded` is the row whose popup is open, which
     /// stays open (and takes the hit) while the mouse is over it.
-    fn hit(&self, p: Point, width: f32, expanded: Option<usize>) -> Hover {
+    fn hit(&self, p: Point, expanded: Option<usize>) -> Hover {
         let offset = wip_rows(self.data);
         if let Some(row) = expanded {
             let badges = self.badges(row);
@@ -239,7 +297,7 @@ impl GraphView<'_> {
                 return Hover { row: Some(row), badge, expanded: Some(row), cursor: p, ..Hover::default() };
             }
         }
-        let screen = (p.y / ROW_H) as usize;
+        let screen = (p.y / row_h()) as usize;
         if screen < offset {
             return Hover { wip: true, cursor: p, ..Hover::default() };
         }
@@ -247,15 +305,15 @@ impl GraphView<'_> {
         if row >= self.data.commits.len() {
             return Hover::default();
         }
-        let center = Point::new(lane_x(self.data.rows[row].lane), self.top(row) + ROW_H / 2.0);
-        let hash_x = self.hash_x(width);
+        let center = Point::new(lane_x(self.data.rows[row].lane), self.top(row) + row_h() / 2.0);
         let badges = self.badges(row);
         let on_badges = badges.contains_x(p.x);
         let badge = (on_badges && p.x <= badges.x + badges.first_w).then_some(0);
         Hover {
             row: Some(row),
-            on_avatar: center.distance(p) <= AVATAR_R + 2.0,
-            on_hash: hash_x - self.graph_width() > 160.0 && p.x >= hash_x && p.x <= hash_x + HASH_W,
+            // The dot is small: allow a few pixels around it.
+            on_avatar: center.distance(p) <= node_r() + if style::minimal() { 5.0 } else { 2.0 },
+            on_hash: (HASH_PAD..=HASH_PAD + HASH_W).contains(&p.x),
             badge,
             expanded: (on_badges && badges.groups.len() > 1).then_some(row),
             cursor: p,
@@ -278,7 +336,7 @@ impl canvas::Program<Message> for GraphView<'_> {
         match event {
             canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 let mut hover =
-                    cursor.position_in(bounds).map(|p| self.hit(p, bounds.width, state.expanded)).unwrap_or_default();
+                    cursor.position_in(bounds).map(|p| self.hit(p, state.expanded)).unwrap_or_default();
                 hover.last_click = state.last_click;
                 let changed = hover.row != state.row
                     || hover.wip != state.wip
@@ -291,7 +349,7 @@ impl canvas::Program<Message> for GraphView<'_> {
             }
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let p = cursor.position_in(bounds)?;
-                let hit = self.hit(p, bounds.width, state.expanded);
+                let hit = self.hit(p, state.expanded);
                 if hit.wip {
                     return Some(canvas::Action::publish(Message::ShowWorktree).and_capture());
                 }
@@ -311,7 +369,7 @@ impl canvas::Program<Message> for GraphView<'_> {
             }
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
                 let p = cursor.position_in(bounds)?;
-                let hit = self.hit(p, bounds.width, state.expanded);
+                let hit = self.hit(p, state.expanded);
                 if hit.wip {
                     return Some(canvas::Action::publish(Message::OpenMenu(Target::Worktree)).and_capture());
                 }
@@ -389,11 +447,12 @@ impl GraphView<'_> {
             frame.fill_text(text("Nenhum commit ainda.", Point::new(12.0, 8.0), p.muted));
             return;
         }
-        let text_x = self.graph_width();
-        let hash_x = self.hash_x(width);
-        let date_x = width - DATE_W;
-        let show_hash = hash_x - text_x > 160.0;
-        let show_date = show_hash && self.show_date(width);
+        let minimal = style::minimal();
+        let (row_h, badge_h) = (row_h(), badge_h());
+        let (date_x, author_x) = self.columns(width);
+        // Hash, date and author: quieter and smaller in the minimal look.
+        let quiet = if minimal { p.faint() } else { p.muted };
+        let small = |s: &str, at: Point, color: Color| Text { size: Pixels(if minimal { 12.0 } else { TEXT_SIZE }), ..text(s, at, color) };
         let head_id = data.head.id.as_deref();
         if wip_rows(data) > 0 {
             self.wip_row(frame, width);
@@ -401,14 +460,16 @@ impl GraphView<'_> {
 
         for (i, (commit, row)) in data.commits.iter().zip(&data.rows).enumerate() {
             let y0 = self.top(i);
-            let mid = y0 + ROW_H / 2.0;
-            let y1 = y0 + ROW_H;
+            let mid = y0 + row_h / 2.0;
+            let y1 = y0 + row_h;
+            let ty = text_y(y0);
             let is_head = Some(commit.id.as_str()) == head_id;
 
             if self.selected == Some(i) {
-                frame.fill_rectangle(Point::new(0.0, y0), Size::new(width, ROW_H), p.selected);
-            } else if is_head {
-                frame.fill_rectangle(Point::new(0.0, y0), Size::new(width, ROW_H), p.accent.scale_alpha(0.10));
+                let color = if minimal { p.accent.scale_alpha(0.12) } else { p.selected };
+                frame.fill_rectangle(Point::new(0.0, y0), Size::new(width, row_h), color);
+            } else if is_head && !minimal {
+                frame.fill_rectangle(Point::new(0.0, y0), Size::new(width, row_h), p.accent.scale_alpha(0.10));
             }
 
             for seg in &row.segments {
@@ -428,7 +489,7 @@ impl GraphView<'_> {
                         pb.bezier_curve_to(Point::new(a.x, c), Point::new(b.x, c), b);
                     })
                 };
-                frame.stroke(&path, Stroke::default().with_color(p.lane(color)).with_width(2.0));
+                frame.stroke(&path, Stroke::default().with_color(p.lane(color)).with_width(if minimal { 1.5 } else { 2.0 }));
             }
 
             let center = Point::new(lane_x(row.lane), mid);
@@ -437,37 +498,47 @@ impl GraphView<'_> {
 
             // Ref badges: the first group, then `+N` for the others.
             let badges = self.badges(i);
+            let by = y0 + (row_h - badge_h) / 2.0;
             if let Some(first) = badges.groups.first() {
-                let rect = Rectangle::new(Point::new(badges.x, y0 + 5.0), Size::new(badges.first_w, BADGE_H));
+                let rect = Rectangle::new(Point::new(badges.x, by), Size::new(badges.first_w, badge_h));
                 self.badge(frame, first, rect, lane_color, false);
             }
             if badges.more_w > 0.0 {
                 let mx = badges.x + badges.first_w + 4.0;
-                let rect = Path::rounded_rectangle(Point::new(mx, y0 + 5.0), Size::new(badges.more_w, BADGE_H), 4.0.into());
-                frame.fill(&rect, p.muted.scale_alpha(0.22));
-                frame.stroke(&rect, Stroke::default().with_color(p.muted.scale_alpha(0.6)).with_width(1.0));
+                let rect = Path::rounded_rectangle(Point::new(mx, by), Size::new(badges.more_w, badge_h), 4.0.into());
+                frame.fill(&rect, p.muted.scale_alpha(if minimal { 0.14 } else { 0.22 }));
+                if !minimal {
+                    frame.stroke(&rect, Stroke::default().with_color(p.muted.scale_alpha(0.6)).with_width(1.0));
+                }
                 frame.fill_text(Text {
-                    size: Pixels(12.0),
-                    ..text(&format!("+{}", badges.groups.len() - 1), Point::new(mx + 6.0, y0 + 8.0), p.text)
+                    size: Pixels(if minimal { 11.0 } else { 12.0 }),
+                    ..text(&format!("+{}", badges.groups.len() - 1), Point::new(mx + 6.0, by + 3.0), if minimal { p.muted } else { p.text })
                 });
             }
             let x = badges.end();
 
-            let limit = if show_hash { hash_x } else { width };
+            let limit = date_x.or(author_x).unwrap_or(width);
             let summary_w = (limit - x - 12.0).max(40.0);
+            let weight = match (is_head, minimal) {
+                (true, true) => font::Weight::Medium,
+                (true, false) => font::Weight::Semibold,
+                _ => font::Weight::Normal,
+            };
             frame.fill_text(Text {
                 max_width: summary_w,
-                font: if is_head { Font { weight: font::Weight::Semibold, ..Font::default() } } else { Font::default() },
-                ..text(&truncate(&commit.summary, summary_w), Point::new(x, y0 + 7.0), p.text)
+                font: Font { weight, ..Font::default() },
+                ..text(&truncate(&commit.summary, summary_w), Point::new(x, ty), p.text)
             });
-            if show_hash {
-                frame.fill_text(Text {
-                    font: Font::MONOSPACE,
-                    ..text(&commit.id[..7.min(commit.id.len())], Point::new(hash_x, y0 + 7.0), p.accent)
-                });
+            frame.fill_text(Text {
+                font: Font::MONOSPACE,
+                ..small(&commit.id[..7.min(commit.id.len())], Point::new(HASH_PAD, ty), if minimal { quiet } else { p.accent })
+            });
+            if let Some(date_x) = date_x {
+                frame.fill_text(small(&util::relative_time(commit.time, self.now), Point::new(date_x, ty), quiet));
             }
-            if show_date {
-                frame.fill_text(text(&util::relative_time(commit.time, self.now), Point::new(date_x, y0 + 7.0), p.muted));
+            if let Some(author_x) = author_x {
+                let name = truncate(&commit.author, AUTHOR_W - 12.0);
+                frame.fill_text(Text { max_width: AUTHOR_W - 8.0, ..small(&name, Point::new(author_x, ty), quiet) });
             }
         }
     }
@@ -476,31 +547,34 @@ impl GraphView<'_> {
     fn wip_row(&self, frame: &mut Frame, width: f32) {
         let p = style::p();
         let data = self.data;
+        let minimal = style::minimal();
+        let (row_h, r) = (row_h(), node_r());
         if self.worktree_selected {
-            frame.fill_rectangle(Point::ORIGIN, Size::new(width, ROW_H), p.selected);
+            frame.fill_rectangle(Point::ORIGIN, Size::new(width, row_h), if minimal { p.accent.scale_alpha(0.12) } else { p.selected });
         }
         let head = data.head.id.as_deref().and_then(|id| data.commit_index(id));
         let (lane, color) = head.map_or((0, p.accent), |h| (data.rows[h].lane, p.lane(data.rows[h].color)));
-        let center = Point::new(lane_x(lane), ROW_H / 2.0);
+        let center = Point::new(lane_x(lane), row_h / 2.0);
         let dashed = Stroke {
-            line_dash: LineDash { segments: &[3.0, 3.0], offset: 0 },
-            ..Stroke::default().with_color(color).with_width(2.0)
+            line_dash: LineDash { segments: if minimal { &[2.0, 2.0] } else { &[3.0, 3.0] }, offset: 0 },
+            ..Stroke::default().with_color(color).with_width(if minimal { 1.5 } else { 2.0 })
         };
         if let Some(h) = head {
             // Drawn before the commits, so avatars on the way cover it.
-            let to = self.top(h) + ROW_H / 2.0 - AVATAR_R - 1.0;
-            frame.stroke(&Path::line(Point::new(center.x, center.y + AVATAR_R + 1.0), Point::new(center.x, to)), dashed);
+            let to = self.top(h) + row_h / 2.0 - r - 1.0;
+            frame.stroke(&Path::line(Point::new(center.x, center.y + r + 1.0), Point::new(center.x, to)), dashed);
         }
-        frame.stroke(&Path::circle(center, AVATAR_R), dashed);
+        frame.stroke(&Path::circle(center, r), dashed);
 
         let n = data.changes.len();
         let ink = if self.worktree_selected { p.text } else { p.muted };
         let x = self.graph_width();
-        frame.fill_text(Text { font: icons::FONT, size: Pixels(13.0), ..text(&icons::PENCIL.to_string(), Point::new(x, 9.0), ink) });
+        let ty = text_y(0.0);
+        frame.fill_text(Text { font: icons::FONT, size: Pixels(13.0), ..text(&icons::PENCIL.to_string(), Point::new(x, ty + 2.0), ink) });
         let label = format!("Alterações não commitadas · {n} arquivo{}", if n == 1 { "" } else { "s" });
         frame.fill_text(Text {
             font: Font { style: font::Style::Italic, ..Font::default() },
-            ..text(&label, Point::new(x + 20.0, 7.0), ink)
+            ..text(&label, Point::new(x + 20.0, ty), ink)
         });
     }
 
@@ -515,6 +589,22 @@ impl GraphView<'_> {
         } else {
             p.muted
         };
+        if style::minimal() {
+            // No frame: a faint tint of the ref color, the current branch as an outline.
+            let ink = if g.current { p.accent } else { color };
+            if g.current {
+                frame.stroke(&path, Stroke::default().with_color(p.accent).with_width(1.0));
+            } else {
+                frame.fill(&path, color.scale_alpha(if hovered { 0.26 } else { 0.14 }));
+            }
+            g.lead_icons(frame, rect, ink);
+            let label = if g.current { format!("✔ {}", g.name) } else { g.name.clone() };
+            let font = Font { weight: if g.current { font::Weight::Semibold } else { font::Weight::Normal }, ..Font::default() };
+            let tx = rect.x + 6.0 + g.name_x();
+            frame.fill_text(Text { font, size: Pixels(12.0), ..text(&label, Point::new(tx, rect.y + 1.5), ink) });
+            self.place_icons(frame, g, rect, if g.current { p.accent } else { p.muted });
+            return;
+        }
         let ink = if g.current { p.bg } else { p.text };
         if g.current {
             frame.fill(&path, p.accent);
@@ -524,18 +614,23 @@ impl GraphView<'_> {
         }
         let label = if g.current { format!("✔ {}", g.name) } else { g.name.clone() };
         let font = if g.current { Font { weight: font::Weight::Bold, ..Font::default() } } else { Font::default() };
-        let tx = rect.x + if g.current { 7.0 } else { 6.0 };
+        g.lead_icons(frame, rect, ink);
+        let tx = rect.x + if g.current { 7.0 } else { 6.0 } + g.name_x();
         frame.fill_text(Text { font, ..text(&label, Point::new(tx, rect.y + 2.0), ink) });
 
+        self.place_icons(frame, g, rect, if g.current { p.bg } else { p.muted });
+    }
+
+    /// The computer (local) and cloud (remote) icons at the end of a badge.
+    fn place_icons(&self, frame: &mut Frame, g: &Group, rect: Rectangle, color: Color) {
         let mut ix = rect.x + rect.width - 4.0 - g.icons() as f32 * ICON_W;
         let cy = rect.center_y();
-        let icon_color = if g.current { p.bg } else { p.muted };
         if g.local.is_some() {
-            computer_icon(frame, Point::new(ix + 1.0, cy), icon_color);
+            computer_icon(frame, Point::new(ix + 1.0, cy), color);
             ix += ICON_W;
         }
         if g.remote.is_some() {
-            cloud_icon(frame, Point::new(ix, cy), icon_color);
+            cloud_icon(frame, Point::new(ix, cy), color);
         }
     }
 
@@ -555,22 +650,31 @@ impl GraphView<'_> {
         }
     }
 
-    /// Round picture (or initials) framed by a ring in the lane color.
+    /// Round picture (or initials) framed by a ring in the lane color; in the
+    /// minimal look, a dot in the lane color with a ring around HEAD.
     fn avatar(&self, frame: &mut Frame, commit: &Commit, center: Point, ring: Color, is_head: bool) {
         let p = style::p();
-        if is_head {
-            frame.fill(&Path::circle(center, AVATAR_R + 5.0), p.accent.scale_alpha(0.30));
+        let r = node_r();
+        if style::minimal() {
+            frame.fill(&Path::circle(center, r), ring);
+            if is_head {
+                frame.stroke(&Path::circle(center, r + 3.0), Stroke::default().with_color(ring).with_width(1.5));
+            }
+            return;
         }
-        let top_left = Point::new(center.x - AVATAR_R, center.y - AVATAR_R);
-        let size = Size::new(AVATAR_R * 2.0, AVATAR_R * 2.0);
+        if is_head {
+            frame.fill(&Path::circle(center, r + 5.0), p.accent.scale_alpha(0.30));
+        }
+        let top_left = Point::new(center.x - r, center.y - r);
+        let size = Size::new(r * 2.0, r * 2.0);
         match self.avatars.get(&commit.email) {
             Some(handle) => {
                 // Fill behind the picture so the lane line never shows through.
-                frame.fill(&Path::circle(center, AVATAR_R), p.panel);
+                frame.fill(&Path::circle(center, r), p.panel);
                 frame.draw_image(Rectangle::new(top_left, size), Image::new(handle.clone()));
             }
             None => {
-                frame.fill(&Path::circle(center, AVATAR_R), avatars::color(&commit.email));
+                frame.fill(&Path::circle(center, r), avatars::color(&commit.email));
                 frame.fill_text(Text {
                     content: avatars::initials(&commit.author),
                     position: center,
@@ -583,10 +687,10 @@ impl GraphView<'_> {
                 });
             }
         }
-        frame.stroke(&Path::circle(center, AVATAR_R + 1.0), Stroke::default().with_color(ring).with_width(2.5));
+        frame.stroke(&Path::circle(center, r + 1.0), Stroke::default().with_color(ring).with_width(2.5));
         if commit.parents.len() > 1 {
             // Merge commits get a small marker.
-            frame.fill(&Path::circle(Point::new(center.x + AVATAR_R, center.y + AVATAR_R), 3.5), ring);
+            frame.fill(&Path::circle(Point::new(center.x + r, center.y + r), 3.5), ring);
         }
     }
 }
@@ -598,6 +702,21 @@ fn computer_icon(frame: &mut Frame, at: Point, color: Color) {
     frame.stroke(&screen, stroke);
     frame.stroke(&Path::line(Point::new(at.x + 5.5, at.y + 2.5), Point::new(at.x + 5.5, at.y + 4.5)), stroke);
     frame.stroke(&Path::line(Point::new(at.x + 2.5, at.y + 4.8), Point::new(at.x + 8.5, at.y + 4.8)), stroke);
+}
+
+/// A price tag pointing right with its hole, ~11px wide, vertically centered on `at.y`.
+fn tag_icon(frame: &mut Frame, at: Point, color: Color) {
+    let (x, y) = (at.x, at.y);
+    let outline = Path::new(|pb| {
+        pb.move_to(Point::new(x, y - 3.5));
+        pb.line_to(Point::new(x + 6.5, y - 3.5));
+        pb.line_to(Point::new(x + 10.5, y));
+        pb.line_to(Point::new(x + 6.5, y + 3.5));
+        pb.line_to(Point::new(x, y + 3.5));
+        pb.close();
+    });
+    frame.stroke(&outline, Stroke::default().with_color(color).with_width(1.2));
+    frame.fill(&Path::circle(Point::new(x + 2.6, y), 1.0), color);
 }
 
 /// A cloud outline, ~13px wide, vertically centered on `at.y`.
@@ -719,17 +838,17 @@ mod tests {
         let (avatars, cache) = (Avatars::default(), Cache::new());
         let (_d, data) = repo(true);
         let g = view(&data, &avatars, &cache);
-        assert_eq!(g.height(), 2.0 * ROW_H);
-        assert_eq!(row_top(&data, 0), ROW_H);
+        assert_eq!(g.height(), 2.0 * row_h());
+        assert_eq!(row_top(&data, 0), row_h());
 
-        let wip = g.hit(Point::new(200.0, ROW_H / 2.0), 800.0, None);
+        let wip = g.hit(Point::new(200.0, row_h() / 2.0), None);
         assert!(wip.wip);
         assert_eq!(wip.row, None);
 
-        let first = g.hit(Point::new(200.0, ROW_H * 1.5), 800.0, None);
+        let first = g.hit(Point::new(200.0, row_h() * 1.5), None);
         assert!(!first.wip);
         assert_eq!(first.row, Some(0));
-        assert_eq!(g.hit(Point::new(200.0, ROW_H * 2.5), 800.0, None).row, None);
+        assert_eq!(g.hit(Point::new(200.0, row_h() * 2.5), None).row, None);
     }
 
     #[test]
@@ -737,9 +856,9 @@ mod tests {
         let (avatars, cache) = (Avatars::default(), Cache::new());
         let (_d, data) = repo(false);
         let g = view(&data, &avatars, &cache);
-        assert_eq!(g.height(), ROW_H);
+        assert_eq!(g.height(), row_h());
         assert_eq!(row_top(&data, 0), 0.0);
-        let first = g.hit(Point::new(200.0, ROW_H / 2.0), 800.0, None);
+        let first = g.hit(Point::new(200.0, row_h() / 2.0), None);
         assert!(!first.wip);
         assert_eq!(first.row, Some(0));
     }

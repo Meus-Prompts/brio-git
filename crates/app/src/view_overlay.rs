@@ -122,7 +122,7 @@ pub fn dialog<'a>(id: TabId, d: &'a Dialog) -> Element<'a, Message> {
     let p = style::p();
     let (title, body, confirm, danger): (String, String, String, bool) = match &d.kind {
         DialogKind::CreateBranch { at } => (format!("Nova branch em {}", rev_label(at)), String::new(), "Criar branch".into(), false),
-        DialogKind::CreateTag { at } => (format!("Nova tag em {}", rev_label(at)), String::new(), "Criar tag".into(), false),
+        DialogKind::CreateTag { at, .. } => (format!("Nova tag em {}", rev_label(at)), String::new(), "Criar tag".into(), false),
         DialogKind::RenameBranch { old } => (format!("Renomear {old}"), String::new(), "Renomear".into(), false),
         DialogKind::Confirm(op) => {
             let (t, b, c) = op.confirmation().unwrap_or_default();
