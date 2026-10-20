@@ -10,6 +10,8 @@
 //! The minimal look ([`style::minimal`]) draws shorter rows, narrower lanes and
 //! a dot per commit instead of the avatar.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use iced::advanced::image::Image;
@@ -31,7 +33,7 @@ use crate::workspace::WsMessage as Message;
 
 const MAX_LANES: usize = 12;
 const TEXT_SIZE: f32 = 13.0;
-/// Rough average glyph width at TEXT_SIZE, used to size badges.
+/// Rough average glyph width at TEXT_SIZE, used to size tooltips and truncate text.
 const CHAR_W: f32 = 7.2;
 /// The hash is the first column; the lanes start after it.
 const HASH_PAD: f32 = 10.0;
@@ -141,10 +143,30 @@ impl Group {
         }
     }
 
+    fn label(&self) -> String {
+        if self.current { format!("✔ {}", self.name) } else { self.name.clone() }
+    }
+
+    /// Font and size of the name, which differ between the two looks.
+    fn font(&self) -> (Font, f32) {
+        let weight = match (self.current, style::minimal()) {
+            (false, _) => font::Weight::Normal,
+            (true, true) => font::Weight::Semibold,
+            (true, false) => font::Weight::Bold,
+        };
+        (Font { weight, ..Font::default() }, if style::minimal() { 12.0 } else { TEXT_SIZE })
+    }
+
+    /// Left padding before the lead icons and the name.
+    fn pad(&self) -> f32 {
+        if self.current && !style::minimal() { 7.0 } else { 6.0 }
+    }
+
     fn width(&self) -> f32 {
-        let chars = self.name.chars().count() + if self.current { 2 } else { 0 };
+        let (font, size) = self.font();
         let icons = self.icons() as f32 * ICON_W;
-        chars as f32 * CHAR_W + if self.current { 18.0 } else { 12.0 } + if icons > 0.0 { icons + 2.0 } else { 0.0 } + self.name_x()
+        let end = if icons > 0.0 { 4.0 + icons + 4.0 } else { 6.0 };
+        self.pad() + self.name_x() + text_width(&self.label(), font, size) + end
     }
 }
 
@@ -272,7 +294,7 @@ impl GraphView<'_> {
     fn badges(&self, row: usize) -> Badges {
         let groups = self.groups(row);
         let first_w = groups.first().map_or(0.0, Group::width);
-        let more_w = if groups.len() > 1 { format!("+{}", groups.len() - 1).len() as f32 * CHAR_W + 12.0 } else { 0.0 };
+        let more_w = if groups.len() > 1 { text_width(&format!("+{}", groups.len() - 1), Font::default(), more_size()) + 12.0 } else { 0.0 };
         Badges { groups, x: self.graph_width(), first_w, more_w }
     }
 
@@ -511,7 +533,7 @@ impl GraphView<'_> {
                     frame.stroke(&rect, Stroke::default().with_color(p.muted.scale_alpha(0.6)).with_width(1.0));
                 }
                 frame.fill_text(Text {
-                    size: Pixels(if minimal { 11.0 } else { 12.0 }),
+                    size: Pixels(more_size()),
                     ..text(&format!("+{}", badges.groups.len() - 1), Point::new(mx + 6.0, by + 3.0), if minimal { p.muted } else { p.text })
                 });
             }
@@ -598,10 +620,9 @@ impl GraphView<'_> {
                 frame.fill(&path, color.scale_alpha(if hovered { 0.26 } else { 0.14 }));
             }
             g.lead_icons(frame, rect, ink);
-            let label = if g.current { format!("✔ {}", g.name) } else { g.name.clone() };
-            let font = Font { weight: if g.current { font::Weight::Semibold } else { font::Weight::Normal }, ..Font::default() };
-            let tx = rect.x + 6.0 + g.name_x();
-            frame.fill_text(Text { font, size: Pixels(12.0), ..text(&label, Point::new(tx, rect.y + 1.5), ink) });
+            let (font, size) = g.font();
+            let tx = rect.x + g.pad() + g.name_x();
+            frame.fill_text(Text { font, size: Pixels(size), ..text(&g.label(), Point::new(tx, rect.y + 1.5), ink) });
             self.place_icons(frame, g, rect, if g.current { p.accent } else { p.muted });
             return;
         }
@@ -612,11 +633,10 @@ impl GraphView<'_> {
             frame.fill(&path, color.scale_alpha(if hovered { 0.38 } else { 0.22 }));
             frame.stroke(&path, Stroke::default().with_color(color).with_width(1.0));
         }
-        let label = if g.current { format!("✔ {}", g.name) } else { g.name.clone() };
-        let font = if g.current { Font { weight: font::Weight::Bold, ..Font::default() } } else { Font::default() };
+        let (font, size) = g.font();
         g.lead_icons(frame, rect, ink);
-        let tx = rect.x + if g.current { 7.0 } else { 6.0 } + g.name_x();
-        frame.fill_text(Text { font, ..text(&label, Point::new(tx, rect.y + 2.0), ink) });
+        let tx = rect.x + g.pad() + g.name_x();
+        frame.fill_text(Text { font, size: Pixels(size), ..text(&g.label(), Point::new(tx, rect.y + 2.0), ink) });
 
         self.place_icons(frame, g, rect, if g.current { p.bg } else { p.muted });
     }
@@ -789,6 +809,40 @@ fn text(content: &str, position: Point, color: Color) -> Text {
         font: Font::default(),
         ..Text::default()
     }
+}
+
+/// Size of the `+N` badge's text.
+fn more_size() -> f32 {
+    if style::minimal() { 11.0 } else { 12.0 }
+}
+
+/// Width of one line of `content` as the renderer shapes it, cached since
+/// badges are measured on every paint and hover.
+fn text_width(content: &str, font: Font, size: f32) -> f32 {
+    use iced::advanced::graphics::text::Paragraph;
+    use iced::advanced::text::{self as core_text, Paragraph as _};
+
+    thread_local! {
+        static WIDTHS: RefCell<HashMap<(String, Font, u32), f32>> = RefCell::new(HashMap::new());
+    }
+    let key = (content.to_owned(), font, size.to_bits());
+    if let Some(w) = WIDTHS.with_borrow(|m| m.get(&key).copied()) {
+        return w;
+    }
+    let w = Paragraph::with_text(core_text::Text {
+        content,
+        bounds: Size::INFINITE,
+        size: Pixels(size),
+        line_height: core_text::LineHeight::default(),
+        font,
+        align_x: TextAlign::Default,
+        align_y: Vertical::Top,
+        shaping: core_text::Shaping::default(),
+        wrapping: core_text::Wrapping::None,
+    })
+    .min_width();
+    WIDTHS.with_borrow_mut(|m| m.insert(key, w));
+    w
 }
 
 /// Cuts text to roughly fit `width` pixels, adding an ellipsis.
