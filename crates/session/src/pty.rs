@@ -464,6 +464,11 @@ mod tests {
         assert!(snap.text().starts_with("hello red"), "got {:?}", snap.text());
         assert_eq!(snap.cell(0, 6).fg, palette(1));
         assert_eq!(snap.cell(0, 0).fg, DEFAULT_FG);
+
+        // The output of an exited program can still be selected.
+        term.select_start(0, 0, false, SelectKind::Cell);
+        term.select_to(0, 4, true);
+        assert_eq!(term.selected_text().as_deref(), Some("hello"));
     }
 
     #[cfg(unix)]

@@ -621,7 +621,7 @@ impl Workspace {
             }
             WsMessage::Key(key, mods, text) => {
                 let focused = self.term_focused;
-                let Some(session) = self.active_session_mut().filter(|s| focused && s.terminal.is_some()) else {
+                let Some(session) = self.active_session_mut().filter(|s| focused && s.running && s.terminal.is_some()) else {
                     return match keys::history_shortcut(&key, mods) {
                         // Only when no commit field is being typed in.
                         Some(redo) => operation::is_focused(COMMIT_SUMMARY).then(move |summary| {

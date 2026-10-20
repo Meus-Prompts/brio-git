@@ -72,11 +72,10 @@ impl Session {
         self.last_input = Some(now);
     }
 
+    /// The child exited; the terminal is kept so its output can still be
+    /// scrolled, selected and copied.
     pub fn exited(&mut self, code: Option<u32>) {
-        if let Some(t) = self.terminal.take() {
-            self.snapshot = Some(t.snapshot());
-            self.cache.clear();
-        }
+        self.refresh();
         self.running = false;
         self.exit_code = code;
         self.last_output = None;
