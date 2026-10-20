@@ -14,6 +14,7 @@ mod keys;
 mod layout;
 mod menu;
 mod persist;
+mod session;
 mod style;
 mod toasts;
 mod util;

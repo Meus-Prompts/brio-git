@@ -1,11 +1,13 @@
 //! Layout of the main window: title bar with tabs, panel toolbar and the
 //! resizable panel grid of the active tab.
 
+use std::time::Instant;
+
 use iced::mouse::Interaction;
 use iced::widget::pane_grid::{self, PaneGrid};
 use iced::widget::{
     button, canvas, center, column, container, mouse_area, opaque, pick_list, row, scrollable, space, stack, text,
-    text_editor, tooltip,
+    text_editor, text_input, tooltip,
 };
 use iced::window::Direction;
 use iced::{Alignment, Color, Element, Fill, Font, Length, Padding};
@@ -15,12 +17,13 @@ use crate::app::{App, Message, Section, TabId};
 use crate::data::RepoData;
 use crate::icons;
 use crate::layout::PaneKind;
+use crate::session::{self, Activity, Session};
 use crate::style;
 use crate::util;
 use crate::widgets::graph::{GraphBase, GraphView};
 use crate::widgets::terminal::TerminalView;
 use crate::avatars::Avatars;
-use crate::workspace::{GRAPH_SCROLL, Selection, Workspace, WsMessage};
+use crate::workspace::{GRAPH_SCROLL, SESSION_NAME, Selection, Workspace, WsMessage};
 use crate::actions::Op;
 use crate::menu::Target;
 use crate::{view_details, view_file, view_overlay};
@@ -49,6 +52,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
     {
         layers = layers.push(view_overlay::branch_picker(tab.id, &tab.ws, picker));
     }
+    if app.session_list {
+        layers = layers.push(view_overlay::session_list(app));
+    }
     if !app.toasts.is_empty() {
         layers = layers.push(view_overlay::toasts(&app.toasts));
     }
@@ -65,13 +71,15 @@ pub fn view(app: &App) -> Element<'_, Message> {
 }
 
 fn title_bar(app: &App) -> Element<'_, Message> {
+    let now = Instant::now();
     let mut tabs = row![].spacing(2).align_y(Alignment::Center);
     for (i, tab) in app.tabs.iter().enumerate() {
         let active = i == app.active;
         let running = tab.ws.session_running();
+        let dot = if tab.ws.working(now) > 0 { style::p().added.scale_alpha(session::pulse()) } else { style::p().warn };
         let confirm = app.confirm_close == Some(tab.id);
         let label = row![
-            text(if running { "● " } else { "" }).size(11).color(style::p().added),
+            text(if running { "● " } else { "" }).size(11).color(dot),
             text(tab.ws.name()).size(13).color(if active { style::p().text } else { style::p().muted }),
         ];
         let close = button(text(if confirm { "fechar?" } else { "✕" }).size(11))
@@ -303,7 +311,25 @@ fn status_bar(app: &App) -> Element<'_, Message> {
     };
     let version = tip(text(version).size(11).color(p.muted.scale_alpha(0.8)), build, tooltip::Position::Top);
 
-    container(row![toggles, space::horizontal(), status, upstream, version].spacing(14).align_y(Alignment::Center))
+    let total: usize = app.tabs.iter().map(|t| t.ws.sessions.len()).sum();
+    let sessions: Element<_> = if total == 0 {
+        space().into()
+    } else {
+        let now = Instant::now();
+        let working: usize = app.tabs.iter().map(|t| t.ws.working(now)).sum();
+        let mut label = format!("{total} {}", if total == 1 { "sessão" } else { "sessões" });
+        if working > 0 {
+            label.push_str(&format!(" · {working} trabalhando"));
+        }
+        let color = if working > 0 { p.added } else { p.muted };
+        let counter = button(row![icons::icon(icons::SPARKLES, 12.0).color(color), text(label).size(12)].spacing(6).align_y(Alignment::Center))
+            .on_press(Message::ToggleSessionList)
+            .style(style::pane_toggle(app.session_list))
+            .padding([2, 7]);
+        tip(counter, "Sessões de IA abertas em todos os repositórios", tooltip::Position::Top)
+    };
+
+    container(row![toggles, space::horizontal(), status, upstream, sessions, version].spacing(14).align_y(Alignment::Center))
         .padding([1, 8])
         .height(26)
         .align_y(Alignment::Center)
@@ -572,51 +598,122 @@ fn graph<'a>(ws: &'a Workspace, repo: &'a RepoData, avatars: &'a Avatars) -> Ele
 
 fn session_panel(ws: &Workspace) -> Element<'_, WsMessage> {
     let names: Vec<String> = ws.tools.iter().map(|t| t.name.clone()).collect();
-    let running = ws.session_running();
-
     let p = style::p();
     let labeled = |glyph: char, label: &'static str| row![icons::icon(glyph, 12.0), text(label).size(13)].spacing(7).align_y(Alignment::Center);
-    let action = if running {
-        button(labeled(icons::STOP, "Parar")).on_press(WsMessage::StopSession).style(style::soft(p.removed))
-    } else {
-        button(labeled(icons::PLAY, "Iniciar sessão"))
-            .on_press_maybe(ws.repo.as_ref().map(|_| WsMessage::StartSession))
-            .style(style::soft(p.accent))
-    }
-    .padding([5, 12]);
-
-    let status = match &ws.session {
-        Some(s) if s.running => {
-            let branch = ws.repo.as_ref().and_then(|r| r.head.branch.clone()).unwrap_or_else(|| "HEAD".into());
-            format!("{} rodando em ⎇ {branch} — clique no terminal para digitar", s.tool)
-        }
-        Some(s) => format!(
-            "{} encerrado{}",
-            s.tool,
-            s.exit_code.map(|c| format!(" (código {c})")).unwrap_or_default()
-        ),
-        None => "A IA roda no diretório e na branch atuais.".into(),
+    let tool = pick_list(names, ws.tool.clone(), WsMessage::ToolSelected).text_size(13).padding([5, 10]).style(style::quiet_pick_list);
+    let new = |label: &'static str| {
+        button(labeled(icons::PLAY, label)).on_press_maybe(ws.repo.as_ref().map(|_| WsMessage::NewSession)).style(style::soft(p.accent)).padding([5, 12])
     };
 
+    let Some(current) = ws.session() else {
+        let bar = row![
+            tool,
+            new("Iniciar sessão"),
+            text("A IA roda no diretório e na branch atuais.").size(12).color(p.muted).width(Fill),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
+        let terminal = canvas(TerminalView {
+            snapshot: None,
+            cache: &ws.idle_cache,
+            focused: false,
+            size: ws.term_size,
+            placeholder: "Escolha uma IA (ou \"terminal\") e clique em Iniciar sessão.",
+        })
+        .width(Fill)
+        .height(Fill);
+        return column![bar, terminal].spacing(8).padding(8).into();
+    };
+
+    let now = Instant::now();
+    let working = ws.working(now);
+    let mut tabs = row![].spacing(4).align_y(Alignment::Center);
+    for s in &ws.sessions {
+        tabs = tabs.push(session_tab(ws, s, now, working));
+    }
+
     let bar = row![
-        pick_list(names, ws.tool.clone(), WsMessage::ToolSelected).text_size(13).padding([5, 10]).style(style::quiet_pick_list),
-        action,
-        text(status).size(12).color(p.muted).width(Fill),
+        scrollable(tabs).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(3).scroller_width(3))).width(Fill),
+        tool,
+        new("Nova sessão"),
     ]
     .spacing(10)
     .align_y(Alignment::Center);
 
+    let branch = ws.repo.as_ref().and_then(|r| r.head.branch.clone()).unwrap_or_else(|| "HEAD".into());
+    let status = match current.activity(now) {
+        Activity::Working => format!("{} trabalhando em ⎇ {branch}", current.tool),
+        Activity::Waiting => format!("{} aguardando em ⎇ {branch} — clique no terminal para digitar", current.tool),
+        Activity::Exited => format!(
+            "{} encerrado{}",
+            current.tool,
+            current.exit_code.map(|c| format!(" (código {c})")).unwrap_or_default()
+        ),
+    };
+    let mut info = row![text(status).size(12).color(p.muted).width(Fill)].spacing(10).align_y(Alignment::Center);
+    if current.running {
+        info = info.push(
+            button(labeled(icons::STOP, "Parar")).on_press(WsMessage::StopSession(current.id)).style(style::soft(p.removed)).padding([3, 10]),
+        );
+    }
+
     let terminal = canvas(TerminalView {
-        snapshot: ws.term_snapshot.as_ref(),
-        cache: &ws.term_cache,
+        snapshot: current.snapshot.as_ref(),
+        cache: &current.cache,
         focused: ws.term_focused,
         size: ws.term_size,
-        placeholder: "Escolha uma IA (ou \"terminal\") e clique em Iniciar sessão.",
+        placeholder: "Iniciando…",
     })
     .width(Fill)
     .height(Fill);
 
-    column![bar, terminal].spacing(8).padding(8).into()
+    column![bar, info, terminal].spacing(6).padding(8).into()
+}
+
+/// One session in the panel's tab bar: state dot, name (double click renames) and ✕.
+fn session_tab<'a>(ws: &'a Workspace, s: &'a Session, now: Instant, working: usize) -> Element<'a, WsMessage> {
+    let p = style::p();
+    let active = ws.active_session == Some(s.id);
+    let activity = s.activity(now);
+    let dot = match activity {
+        Activity::Working => text("●").color(p.added.scale_alpha(session::pulse())),
+        Activity::Waiting => text("●").color(p.warn),
+        Activity::Exited => text("○").color(p.muted),
+    }
+    .size(11);
+
+    let name: Element<'a, WsMessage> = match &ws.renaming {
+        Some((id, draft)) if *id == s.id => text_input("Nome da sessão", draft)
+            .id(SESSION_NAME)
+            .on_input(WsMessage::SessionNameInput)
+            .on_submit(WsMessage::SessionNameSubmit)
+            .size(13)
+            .padding([1, 4])
+            .width(160)
+            .into(),
+        _ => mouse_area(text(s.name.clone()).size(13).color(if active { p.text } else { p.muted }))
+            .on_press(WsMessage::SelectSession(s.id))
+            .on_double_click(WsMessage::RenameSession(s.id))
+            .interaction(Interaction::Pointer)
+            .into(),
+    };
+
+    let mut label = row![dot, name].spacing(6).align_y(Alignment::Center);
+    // Two AIs printing at once in the same folder may be editing the same files.
+    if activity == Activity::Working && working > 1 {
+        let warning = container(text("Outra sessão também está trabalhando nesta pasta.").size(12)).padding([5, 9]).style(style::popover);
+        label = label.push(tooltip(icons::icon(icons::ALERT, 11.0).color(p.warn), warning, tooltip::Position::Bottom).gap(6));
+    }
+
+    let confirm = ws.confirm_close_session == Some(s.id);
+    let close = button(text(if confirm { "fechar?" } else { "✕" }).size(11))
+        .on_press(WsMessage::CloseSession(s.id))
+        .style(if confirm { button::danger } else { button::text })
+        .padding([1, 5]);
+
+    let tab = row![mouse_area(container(label).padding([4, 8])).on_press(WsMessage::SelectSession(s.id)), close]
+        .align_y(Alignment::Center);
+    container(tab).style(if active { style::tab_active } else { style::tab }).into()
 }
 
 /// Settings modal: a section list on the left, the section on the right.

@@ -1,9 +1,10 @@
-//! One open repository (a tab): its data, live watcher and AI session.
+//! One open repository (a tab): its data, live watcher and AI sessions.
 //! Views live in `view.rs`.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use iced::keyboard::{Key, Modifiers};
 use iced::widget::canvas::Cache;
@@ -14,7 +15,7 @@ use iced::widget::text_editor;
 use brio_core::RefKind;
 use brio_ops::actions::ResetMode;
 use brio_ops::undo::{self, Snapshot};
-use brio_session::{TermEvent, TermSnapshot, Terminal, Tool, WatchHandle};
+use brio_session::{TermEvent, Terminal, Tool, WatchHandle};
 
 use crate::actions::{CheckoutTarget, Op};
 use crate::branch_picker::{self, BranchPicker, Choice};
@@ -22,6 +23,7 @@ use crate::data::RepoData;
 use crate::menu::Target;
 use crate::history::{self, History};
 use crate::fileview::{self, Details, FileTarget, FileView, Loaded, Mode};
+use crate::session::{self, Activity, Session, SessionId};
 use crate::util::{self, blocking};
 use crate::widgets::graph;
 use crate::keys;
@@ -62,13 +64,7 @@ pub struct Dialog {
 pub const DIALOG_INPUT: &str = "dialog-input";
 pub const COMMIT_SUMMARY: &str = "commit-summary";
 pub const COMMIT_BODY: &str = "commit-body";
-
-/// The AI session running in the embedded terminal.
-pub struct Session {
-    pub tool: String,
-    pub running: bool,
-    pub exit_code: Option<u32>,
-}
+pub const SESSION_NAME: &str = "session-name";
 
 pub struct Workspace {
     /// Folder the tab was opened with (the work tree once loaded).
@@ -114,12 +110,18 @@ pub struct Workspace {
 
     pub tools: Vec<Tool>,
     pub tool: Option<String>,
-    pub terminal: Option<Terminal>,
-    pub term_snapshot: Option<TermSnapshot>,
-    pub term_cache: Cache,
+    /// AI sessions, in tab order; the panel shows `active_session`.
+    pub sessions: Vec<Session>,
+    pub active_session: Option<SessionId>,
+    next_session: SessionId,
+    /// Session whose name is being edited, with the text typed so far.
+    pub renaming: Option<(SessionId, String)>,
+    /// Session waiting for a second click on ✕ because it is still running.
+    pub confirm_close_session: Option<SessionId>,
+    /// Canvas cache of the empty terminal shown before any session starts.
+    pub idle_cache: Cache,
     pub term_focused: bool,
     pub term_size: (u16, u16),
-    pub session: Option<Session>,
 
     pub error: Option<String>,
     pub notice: Option<String>,
@@ -188,9 +190,16 @@ pub enum WsMessage {
     UnstageAll,
 
     ToolSelected(String),
-    StartSession,
-    StopSession,
-    Term(TermEvent),
+    /// Starts a session with the selected tool.
+    NewSession,
+    SelectSession(SessionId),
+    StopSession(SessionId),
+    CloseSession(SessionId),
+    /// Double click on a session tab: edit its name.
+    RenameSession(SessionId),
+    SessionNameInput(String),
+    SessionNameSubmit,
+    Term(SessionId, TermEvent),
     TermResize(u16, u16),
     TermScroll(i32),
     /// Jumps the terminal view to this many lines back into history.
@@ -242,12 +251,14 @@ impl Workspace {
             generating: false,
             tools,
             tool,
-            terminal: None,
-            term_snapshot: None,
-            term_cache: Cache::new(),
+            sessions: Vec::new(),
+            active_session: None,
+            next_session: 0,
+            renaming: None,
+            confirm_close_session: None,
+            idle_cache: Cache::new(),
             term_focused: false,
             term_size: (120, 20),
-            session: None,
             error: None,
             notice: None,
         };
@@ -262,7 +273,26 @@ impl Workspace {
     }
 
     pub fn session_running(&self) -> bool {
-        self.session.as_ref().is_some_and(|s| s.running)
+        self.sessions.iter().any(|s| s.running)
+    }
+
+    /// The session shown in the panel.
+    pub fn session(&self) -> Option<&Session> {
+        self.sessions.iter().find(|s| Some(s.id) == self.active_session)
+    }
+
+    fn session_mut(&mut self, id: SessionId) -> Option<&mut Session> {
+        self.sessions.iter_mut().find(|s| s.id == id)
+    }
+
+    fn active_session_mut(&mut self) -> Option<&mut Session> {
+        let id = self.active_session?;
+        self.session_mut(id)
+    }
+
+    /// Sessions printing output right now.
+    pub fn working(&self, now: Instant) -> usize {
+        self.sessions.iter().filter(|s| s.activity(now) == Activity::Working).count()
     }
 
     pub fn update(&mut self, message: WsMessage) -> Task<WsMessage> {
@@ -378,7 +408,9 @@ impl Workspace {
             }
             WsMessage::ThemeChanged => {
                 self.graph_cache.clear();
-                self.term_cache.clear();
+                for s in &self.sessions {
+                    s.cache.clear();
+                }
                 if let Some(fv) = self.file_view.as_mut() {
                     fv.invalidate();
                 }
@@ -389,60 +421,106 @@ impl Workspace {
                 self.tool = Some(name);
                 Task::none()
             }
-            WsMessage::StartSession => self.start_session(),
-            WsMessage::StopSession => {
-                if let Some(t) = self.terminal.as_mut() {
+            WsMessage::NewSession => self.start_session(),
+            WsMessage::SelectSession(id) => {
+                if self.renaming.as_ref().is_some_and(|(r, _)| *r != id) {
+                    self.finish_rename();
+                }
+                self.confirm_close_session = None;
+                self.active_session = Some(id);
+                self.term_focused = self.session().is_some_and(|s| s.running);
+                Task::none()
+            }
+            WsMessage::StopSession(id) => {
+                if let Some(t) = self.session_mut(id).and_then(|s| s.terminal.as_mut()) {
                     t.kill();
                 }
                 Task::none()
             }
-            WsMessage::Term(TermEvent::Output) => {
-                if let Some(t) = &self.terminal {
-                    self.term_snapshot = Some(t.snapshot());
-                    self.term_cache.clear();
+            WsMessage::CloseSession(id) => {
+                let Some(i) = self.sessions.iter().position(|s| s.id == id) else { return Task::none() };
+                if self.sessions[i].running && self.confirm_close_session != Some(id) {
+                    self.confirm_close_session = Some(id);
+                    return Task::none();
+                }
+                self.confirm_close_session = None;
+                // Dropping the session kills its terminal.
+                self.sessions.remove(i);
+                if self.active_session == Some(id) {
+                    self.active_session = self.sessions.get(i.min(self.sessions.len().saturating_sub(1))).map(|s| s.id);
+                    self.term_focused = false;
+                }
+                if self.renaming.as_ref().is_some_and(|(r, _)| *r == id) {
+                    self.renaming = None;
                 }
                 Task::none()
             }
-            WsMessage::Term(TermEvent::Exited(code)) => {
-                if let Some(t) = self.terminal.take() {
-                    self.term_snapshot = Some(t.snapshot());
-                    self.term_cache.clear();
-                }
+            WsMessage::RenameSession(id) => {
+                let Some(name) = self.session_mut(id).map(|s| s.name.clone()) else { return Task::none() };
                 self.term_focused = false;
-                if let Some(s) = self.session.as_mut() {
-                    s.running = false;
-                    s.exit_code = code;
+                self.renaming = Some((id, name));
+                Task::batch([operation::focus(SESSION_NAME), operation::select_all(SESSION_NAME)])
+            }
+            WsMessage::SessionNameInput(text) => {
+                if let Some((_, name)) = self.renaming.as_mut() {
+                    *name = text;
+                }
+                Task::none()
+            }
+            WsMessage::SessionNameSubmit => {
+                self.finish_rename();
+                Task::none()
+            }
+            WsMessage::Term(id, TermEvent::Output) => {
+                if let Some(s) = self.session_mut(id) {
+                    s.refresh();
+                    s.mark_output(Instant::now());
+                }
+                Task::none()
+            }
+            WsMessage::Term(id, TermEvent::Exited(code)) => {
+                if let Some(s) = self.session_mut(id) {
+                    s.exited(code);
+                }
+                if self.active_session == Some(id) {
+                    self.term_focused = false;
                 }
                 Task::none()
             }
             WsMessage::TermResize(cols, rows) => {
                 self.term_size = (cols, rows);
-                if let Some(t) = self.terminal.as_mut() {
-                    t.resize(cols, rows);
-                    self.term_snapshot = Some(t.snapshot());
-                    self.term_cache.clear();
+                // Every session shares the panel, so they all take its size.
+                for s in &mut self.sessions {
+                    if let Some(t) = s.terminal.as_mut() {
+                        t.resize(cols, rows);
+                    }
+                    s.refresh();
                 }
                 Task::none()
             }
             WsMessage::TermScroll(lines) => {
-                if let Some(t) = &self.terminal {
-                    t.scroll(lines);
-                    self.term_snapshot = Some(t.snapshot());
-                    self.term_cache.clear();
+                if let Some(s) = self.active_session_mut() {
+                    if let Some(t) = &s.terminal {
+                        t.scroll(lines);
+                    }
+                    s.refresh();
                 }
                 Task::none()
             }
             WsMessage::TermScrollTo(offset) => {
-                if let Some(t) = &self.terminal {
-                    t.scroll_to(offset);
-                    self.term_snapshot = Some(t.snapshot());
-                    self.term_cache.clear();
+                if let Some(s) = self.active_session_mut() {
+                    if let Some(t) = &s.terminal {
+                        t.scroll_to(offset);
+                    }
+                    s.refresh();
                 }
                 Task::none()
             }
             WsMessage::TermFocus(focused) => {
-                self.term_focused = focused && self.terminal.is_some();
-                self.term_cache.clear();
+                self.term_focused = focused && self.session().is_some_and(|s| s.running);
+                if let Some(s) = self.session() {
+                    s.cache.clear();
+                }
                 Task::none()
             }
             WsMessage::Key(key, _, _) if self.branch_picker.is_some() => {
@@ -462,7 +540,7 @@ impl Workspace {
                 iced::widget::operation::focus(branch_picker::INPUT)
             }
             WsMessage::CloseOverlays => {
-                if self.branch_picker.take().is_none() {
+                if self.renaming.take().is_none() && self.branch_picker.take().is_none() {
                     self.dialog = None;
                 }
                 Task::none()
@@ -502,7 +580,8 @@ impl Workspace {
                 Task::none()
             }
             WsMessage::Key(key, mods, text) => {
-                let Some(term) = self.terminal.as_ref().filter(|_| self.term_focused) else {
+                let focused = self.term_focused;
+                let Some(session) = self.active_session_mut().filter(|s| focused && s.terminal.is_some()) else {
                     return match keys::history_shortcut(&key, mods) {
                         // Only when no commit field is being typed in.
                         Some(redo) => operation::is_focused(COMMIT_SUMMARY).then(move |summary| {
@@ -515,14 +594,20 @@ impl Workspace {
                 if keys::is_paste(&key, mods) {
                     return iced::clipboard::read().map(WsMessage::Paste);
                 }
-                if let Some(bytes) = keys::encode(&key, mods, text.as_deref(), term.app_cursor()) {
+                if let Some(term) = &session.terminal
+                    && let Some(bytes) = keys::encode(&key, mods, text.as_deref(), term.app_cursor())
+                {
                     term.write(&bytes);
+                    session.mark_input(Instant::now());
                 }
                 Task::none()
             }
             WsMessage::Paste(text) => {
-                if let (Some(term), Some(text)) = (&self.terminal, text) {
+                if let (Some(session), Some(text)) = (self.active_session_mut(), text)
+                    && let Some(term) = &session.terminal
+                {
                     term.write(&keys::paste(&text, term.bracketed_paste()));
+                    session.mark_input(Instant::now());
                 }
                 Task::none()
             }
@@ -968,21 +1053,30 @@ impl Workspace {
         let (cols, rows) = self.term_size;
         match Terminal::spawn(&tool, &repo.workdir, cols, rows) {
             Ok((terminal, rx)) => {
-                self.terminal = Some(terminal);
-                self.term_snapshot = None;
-                self.term_cache.clear();
+                self.finish_rename();
+                let id = self.next_session;
+                self.next_session += 1;
+                let name = session::default_name(&tool.name, self.sessions.iter().map(|s| s.name.as_str()));
+                self.sessions.push(Session::new(id, name, tool.name.clone(), Some(terminal)));
+                self.active_session = Some(id);
                 self.term_focused = true;
-                self.session = Some(Session {
-                    tool: tool.name.clone(),
-                    running: true,
-                    exit_code: None,
-                });
-                Task::run(rx, WsMessage::Term)
+                Task::run(rx, move |e| WsMessage::Term(id, e))
             }
             Err(e) => {
                 self.error = Some(format!("Não foi possível iniciar {}: {e}", tool.name));
                 Task::none()
             }
+        }
+    }
+
+    /// Saves the name being edited; an empty one keeps the old name.
+    fn finish_rename(&mut self) {
+        let Some((id, name)) = self.renaming.take() else { return };
+        let name = name.trim();
+        if let Some(s) = self.session_mut(id)
+            && !name.is_empty()
+        {
+            s.name = name.to_owned();
         }
     }
 }

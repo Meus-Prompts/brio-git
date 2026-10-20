@@ -15,6 +15,7 @@ use crate::avatars::{self, Avatars};
 use crate::layout::{Layout, PaneKind};
 use crate::menu::{self, MenuItem};
 use crate::persist::{self, Saved};
+use crate::session::SessionId;
 use crate::style;
 use crate::toasts::{self, Toasts};
 use crate::util::blocking;
@@ -53,6 +54,8 @@ pub struct App {
 
     /// Open context menu, if any.
     pub menu: Option<ContextMenu>,
+    /// List of every open AI session, opened from the status bar.
+    pub session_list: bool,
     /// Last cursor position in window coordinates, written by an invisible
     /// layer without producing messages (see `view::CursorTracker`).
     pub cursor: Cell<Point>,
@@ -108,6 +111,9 @@ pub enum Message {
     MenuPick(WsMessage),
     MenuHover(Option<usize>),
     CloseMenu,
+    ToggleSessionList,
+    /// Shows a session: selects its tab and opens the session panel.
+    GoToSession(TabId, SessionId),
     WindowResized(Size),
     AvatarLoaded(String, Option<avatars::Picture>),
 
@@ -153,6 +159,7 @@ impl App {
             toasts: Toasts::default(),
             avatars: Avatars::default(),
             menu: None,
+            session_list: false,
             cursor: Cell::new(Point::ORIGIN),
             window_size: Size::new(1440.0, 920.0),
             pinned: saved.pinned.iter().map(|(k, v)| (PathBuf::from(k), v.clone())).collect(),
@@ -198,7 +205,10 @@ impl App {
             _ => None,
         });
         let close = window::close_requests().map(|_| Message::Close);
-        let tick = if self.toasts.is_empty() {
+        // Also animates the "working" dots and lets them fade once the output stops.
+        let now = Instant::now();
+        let working = self.tabs.iter().any(|t| t.ws.working(now) > 0);
+        let tick = if self.toasts.is_empty() && !working {
             Subscription::none()
         } else {
             iced::time::every(Duration::from_millis(250)).map(Message::Tick)
@@ -264,6 +274,22 @@ impl App {
             Message::CloseMenu => {
                 self.menu = None;
                 Task::none()
+            }
+            Message::ToggleSessionList => {
+                self.session_list = !self.session_list;
+                Task::none()
+            }
+            Message::GoToSession(tab, session) => {
+                self.session_list = false;
+                let Some(i) = self.index_of(tab) else { return Task::none() };
+                self.active = i;
+                self.confirm_close = None;
+                if !self.layout.is_visible(PaneKind::Session) {
+                    self.layout.set_visible(PaneKind::Session, true);
+                    self.panes = self.layout.build();
+                }
+                self.save();
+                self.forward(tab, WsMessage::SelectSession(session))
             }
             Message::WindowResized(size) => {
                 self.window_size = size;
@@ -424,6 +450,12 @@ impl App {
             Message::Key(key, _, _) if self.menu.is_some() => {
                 if key == Key::Named(keyboard::key::Named::Escape) {
                     self.menu = None;
+                }
+                Task::none()
+            }
+            Message::Key(key, _, _) if self.session_list => {
+                if key == Key::Named(keyboard::key::Named::Escape) {
+                    self.session_list = false;
                 }
                 Task::none()
             }

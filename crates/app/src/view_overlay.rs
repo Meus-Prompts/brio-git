@@ -16,6 +16,7 @@ use crate::branch_picker::{self, BranchPicker, Choice};
 use crate::icons;
 use crate::app::{App, ContextMenu, Message, TabId};
 use crate::menu::{MenuItem, rev_label};
+use crate::session::{self, Activity};
 use crate::style;
 use crate::toasts::{self, Toasts};
 use crate::workspace::{DIALOG_INPUT, Dialog, DialogKind, Workspace, WsMessage};
@@ -265,6 +266,49 @@ pub fn branch_picker<'a>(id: TabId, ws: &'a Workspace, picker: &'a BranchPicker)
     let placed = container(opaque(panel)).padding(Padding { top: 76.0, left: 14.0, ..Padding::ZERO });
     let layer: Element<'a, WsMessage> = stack![backdrop, placed].into();
     layer.map(move |m| Message::Tab(id, m))
+}
+
+/// Every open AI session, grouped by repository, above the status bar counter.
+pub fn session_list(app: &App) -> Element<'_, Message> {
+    let p = style::p();
+    let now = std::time::Instant::now();
+    let mut list = column![].spacing(1);
+    for tab in app.tabs.iter().filter(|t| !t.ws.sessions.is_empty()) {
+        list = list.push(container(text(tab.ws.name()).size(10).color(p.muted)).padding([6, 8]));
+        for s in &tab.ws.sessions {
+            let (dot, color, state) = match s.activity(now) {
+                Activity::Working => ("●", p.added.scale_alpha(session::pulse()), "trabalhando"),
+                Activity::Waiting => ("●", p.warn, "aguardando"),
+                Activity::Exited => ("○", p.muted, "encerrada"),
+            };
+            let line = row![
+                text(dot).size(11).color(color),
+                text(s.name.clone()).size(13),
+                text(s.tool.clone()).size(11).color(p.muted),
+                space::horizontal(),
+                text(state).size(11).color(p.muted),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center);
+            list = list.push(
+                button(line)
+                    .on_press(Message::GoToSession(tab.id, s.id))
+                    .style(|t: &Theme, st| style::list_item(t, st, false))
+                    .padding([5, 8])
+                    .width(Fill),
+            );
+        }
+    }
+    let panel = container(scrollable(list).height(Length::Shrink)).padding(6).width(340).max_height(420).style(style::popover);
+
+    let backdrop = mouse_area(container(space()).width(Fill).height(Fill)).on_press(Message::ToggleSessionList);
+    let placed = container(opaque(panel))
+        .width(Fill)
+        .height(Fill)
+        .align_x(Alignment::End)
+        .align_y(Alignment::End)
+        .padding(Padding { right: 60.0, bottom: 30.0, ..Padding::ZERO });
+    stack![backdrop, placed].into()
 }
 
 /// Toasts stacked in the bottom-right corner, above the status bar; newest last.
