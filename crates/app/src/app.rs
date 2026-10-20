@@ -18,6 +18,7 @@ use crate::persist::{self, Saved};
 use crate::session::SessionId;
 use crate::style;
 use crate::toasts::{self, Toasts};
+use crate::update::{self, Outcome};
 use crate::util::blocking;
 use crate::workspace::{Workspace, WsMessage};
 
@@ -52,6 +53,15 @@ pub struct App {
     pub toasts: Toasts,
     pub avatars: Avatars,
 
+    pub auto_update: bool,
+    /// A newer release: installed and waiting for a restart, or only available.
+    pub update: Option<Outcome>,
+    pub checking_update: bool,
+    /// Result of the last check, shown in the settings.
+    pub update_note: Option<String>,
+    /// "Restart" was clicked once while AI sessions were running.
+    pub confirm_restart: bool,
+
     /// Open context menu, if any.
     pub menu: Option<ContextMenu>,
     /// List of every open AI session, opened from the status bar.
@@ -68,6 +78,7 @@ pub struct App {
 pub enum Section {
     Appearance,
     CommitAi,
+    Updates,
 }
 
 pub struct ContextMenu {
@@ -117,6 +128,12 @@ pub enum Message {
     WindowResized(Size),
     AvatarLoaded(String, Option<avatars::Picture>),
 
+    CheckUpdate { manual: bool },
+    UpdateChecked { manual: bool, result: Result<Outcome, String> },
+    /// Restarts into the installed update, or opens the release page when it could not be installed.
+    ApplyUpdate,
+    SetAutoUpdate(bool),
+
     Key(Key, Modifiers, Option<String>),
     EscapeInField,
 }
@@ -158,6 +175,11 @@ impl App {
             commit_prompt: saved.commit_prompt.clone(),
             toasts: Toasts::default(),
             avatars: Avatars::default(),
+            auto_update: saved.auto_update,
+            update: None,
+            checking_update: false,
+            update_note: None,
+            confirm_restart: false,
             menu: None,
             session_list: false,
             cursor: Cell::new(Point::ORIGIN),
@@ -169,6 +191,14 @@ impl App {
             app.active = saved.active.min(app.tabs.len().saturating_sub(1));
         }
         tasks.push(window::oldest().map(Message::WindowReady));
+        update::cleanup();
+        if app.auto_update && update::enabled() {
+            let wait = blocking(|| {
+                std::thread::sleep(update::FIRST_CHECK);
+                Ok(())
+            });
+            tasks.push(Task::perform(wait, |_: Result<(), String>| Message::CheckUpdate { manual: false }));
+        }
         (app, Task::batch(tasks))
     }
 
@@ -214,7 +244,13 @@ impl App {
             iced::time::every(Duration::from_millis(250)).map(Message::Tick)
         };
         let resize = window::resize_events().map(|(_, size)| Message::WindowResized(size));
-        Subscription::batch([keys, close, resize, tick])
+        let ready = matches!(self.update, Some(Outcome::Ready { .. }));
+        let updates = if self.auto_update && update::enabled() && !ready {
+            iced::time::every(update::CHECK_EVERY).map(|_| Message::CheckUpdate { manual: false })
+        } else {
+            Subscription::none()
+        };
+        Subscription::batch([keys, close, resize, tick, updates])
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -447,6 +483,72 @@ impl App {
                 Task::none()
             }
 
+            Message::CheckUpdate { manual } => {
+                if !update::enabled() {
+                    self.update_note = Some("Builds locais (cargo run, cargo install) não se atualizam.".into());
+                    return Task::none();
+                }
+                if self.checking_update || matches!(self.update, Some(Outcome::Ready { .. })) {
+                    return Task::none();
+                }
+                self.checking_update = true;
+                Task::perform(blocking(update::check_and_install), move |result| Message::UpdateChecked { manual, result })
+            }
+            Message::UpdateChecked { manual, result } => {
+                self.checking_update = false;
+                let now = Instant::now();
+                match result {
+                    Ok(found) => {
+                        let note = found.message();
+                        let kind = if matches!(found, Outcome::Available { .. }) { toasts::Kind::Error } else { toasts::Kind::Info };
+                        // Periodic checks find the same release again; tell only once.
+                        let new = found != Outcome::UpToDate && self.update.as_ref() != Some(&found);
+                        if manual || new {
+                            self.toasts.push(kind, note.clone(), None, now);
+                        }
+                        self.update_note = Some(note);
+                        if found != Outcome::UpToDate {
+                            self.update = Some(found);
+                        }
+                    }
+                    Err(e) => {
+                        if manual {
+                            self.toasts.push(toasts::Kind::Error, e.clone(), None, now);
+                        }
+                        self.update_note = Some(e);
+                    }
+                }
+                Task::none()
+            }
+            Message::ApplyUpdate => match self.update.clone() {
+                Some(Outcome::Ready { launch, .. }) => {
+                    let running: usize = self.tabs.iter().map(|t| t.ws.sessions.iter().filter(|s| s.running).count()).sum();
+                    if running > 0 && !self.confirm_restart {
+                        self.confirm_restart = true;
+                        return Task::none();
+                    }
+                    self.save();
+                    match update::relaunch(&launch) {
+                        Ok(()) => iced::exit(),
+                        Err(e) => {
+                            self.confirm_restart = false;
+                            self.error = Some(format!("Não foi possível reiniciar: {e}"));
+                            Task::none()
+                        }
+                    }
+                }
+                Some(Outcome::Available { page, .. }) => {
+                    crate::util::open_url(&page);
+                    Task::none()
+                }
+                _ => Task::none(),
+            },
+            Message::SetAutoUpdate(on) => {
+                self.auto_update = on;
+                self.save();
+                Task::none()
+            }
+
             Message::Key(key, _, _) if self.menu.is_some() => {
                 if key == Key::Named(keyboard::key::Named::Escape) {
                     self.menu = None;
@@ -544,6 +646,7 @@ impl App {
             theme: style::p().name.to_owned(),
             pinned,
             commit_prompt: self.commit_prompt.clone(),
+            auto_update: self.auto_update,
         };
         if let Err(e) = persist::save(file, &saved) {
             self.error = Some(format!("Não foi possível salvar o estado: {e}"));

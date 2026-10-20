@@ -17,6 +17,7 @@ Cliente Git desktop (Rust + [iced](https://iced.rs)) focado em acompanhar uma IA
 - **Reflog**: painel com os últimos movimentos do HEAD (commit, checkout, reset, rebase…). Clique mostra o commit, mesmo os que nenhuma branch alcança mais; o botão direito abre o menu de commit (criar branch aqui, checkout, reset…) para recuperar trabalho perdido.
 - **Alterações não commitadas** aparecem como uma linha tracejada no topo do grafo, ligada ao HEAD; clique para ver o working tree, botão direito para stage, stash ou descartar.
 - **Configurações** (engrenagem na barra de título): 13 temas (Dark, Tokyo Night, Dracula, One Dark, Nord, Gruvbox, Solarized, Catppuccin, Rosé Pine…) e o **prompt** usado para gerar a mensagem de commit com IA (o diff em stage é anexado depois dele; "Restaurar padrão" volta ao original).
+- **Atualização automática**: ao abrir e a cada 6 h, o app procura uma versão nova em Releases, baixa o arquivo do seu sistema (AppImage, binário Linux, `brio-git.app` ou `.exe`), confere o SHA-256 e instala em segundo plano. Um botão **Reiniciar para vX.Y.Z** aparece no rodapé; se você não clicar, a próxima abertura já usa a versão nova. Quando a pasta não permite escrita, o botão abre a página da release. Desligue em Configurações > Atualizações. Builds locais (`dev`) não se atualizam.
 - **Avisos em toasts** no canto inferior direito: sucesso some em 4 s, erro em 10 s, ou feche no ✕.
 
 ## Rodar

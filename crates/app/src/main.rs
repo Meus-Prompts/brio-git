@@ -17,6 +17,7 @@ mod persist;
 mod session;
 mod style;
 mod toasts;
+mod update;
 mod util;
 mod view;
 mod view_details;

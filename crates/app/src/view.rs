@@ -6,7 +6,7 @@ use std::time::Instant;
 use iced::mouse::Interaction;
 use iced::widget::pane_grid::{self, PaneGrid};
 use iced::widget::{
-    button, canvas, center, column, container, mouse_area, opaque, pick_list, row, scrollable, space, stack, text,
+    button, canvas, center, checkbox, column, container, mouse_area, opaque, pick_list, row, scrollable, space, stack, text,
     text_editor, text_input, tooltip,
 };
 use iced::window::Direction;
@@ -17,6 +17,7 @@ use crate::app::{App, Message, Section, TabId};
 use crate::data::RepoData;
 use crate::icons;
 use crate::layout::PaneKind;
+use crate::update::{self, Outcome};
 use crate::session::{self, Activity, Session};
 use crate::style;
 use crate::util;
@@ -329,7 +330,31 @@ fn status_bar(app: &App) -> Element<'_, Message> {
         tip(counter, "Sessões de IA abertas em todos os repositórios", tooltip::Position::Top)
     };
 
-    container(row![toggles, space::horizontal(), status, upstream, sessions, version].spacing(14).align_y(Alignment::Center))
+    let update: Element<_> = match &app.update {
+        Some(Outcome::Ready { version, .. }) => {
+            let running: usize = app.tabs.iter().map(|t| t.ws.sessions.iter().filter(|s| s.running).count()).sum();
+            let label = match (app.confirm_restart, running) {
+                (false, _) => format!("Reiniciar para v{version}"),
+                (true, 1) => "Reiniciar? 1 sessão será encerrada".to_owned(),
+                (true, n) => format!("Reiniciar? {n} sessões serão encerradas"),
+            };
+            let restart = button(row![icons::icon(icons::REFRESH, 12.0), text(label).size(12)].spacing(6).align_y(Alignment::Center))
+                .on_press(Message::ApplyUpdate)
+                .style(style::soft(if app.confirm_restart { p.removed } else { p.accent }))
+                .padding([1, 8]);
+            tip(restart, "A versão nova já está instalada; reinicie para usá-la. As abas voltam abertas.", tooltip::Position::Top)
+        }
+        Some(Outcome::Available { version, reason, .. }) => {
+            let open = button(row![icons::icon(icons::PULL, 12.0), text(format!("v{version} disponível")).size(12)].spacing(6).align_y(Alignment::Center))
+                .on_press(Message::ApplyUpdate)
+                .style(style::soft(p.warn))
+                .padding([1, 8]);
+            tip(open, format!("Não foi possível atualizar sozinho: {reason}. Clique para baixar."), tooltip::Position::Top)
+        }
+        _ => space().into(),
+    };
+
+    container(row![toggles, space::horizontal(), status, upstream, sessions, update, version].spacing(14).align_y(Alignment::Center))
         .padding([1, 8])
         .height(26)
         .align_y(Alignment::Center)
@@ -730,6 +755,7 @@ fn settings(app: &App, section: Section) -> Element<'_, Message> {
     let nav = column![
         entry(Section::Appearance, icons::PALETTE, "Aparência"),
         entry(Section::CommitAi, icons::SPARKLES, "Commit com IA"),
+        entry(Section::Updates, icons::REFRESH, "Atualizações"),
     ]
     .spacing(2)
     .width(180);
@@ -778,6 +804,31 @@ fn settings(app: &App, section: Section) -> Element<'_, Message> {
                     .color(p.muted),
             ]
             .spacing(10)
+            .padding(Padding { right: 10.0, ..Padding::ZERO })
+            .into()
+        }
+        Section::Updates => {
+            let installed = if update::enabled() { format!("v{}", util::VERSION) } else { "dev (build local)".into() };
+            let check = button(row![icons::icon(icons::REFRESH, 12.0), text(if app.checking_update { "Procurando…" } else { "Procurar agora" }).size(13)].spacing(7).align_y(Alignment::Center))
+                .on_press_maybe((update::enabled() && !app.checking_update).then_some(Message::CheckUpdate { manual: true }))
+                .style(style::soft(p.accent))
+                .padding([5, 12]);
+            let note = match (&app.update_note, update::enabled()) {
+                (Some(n), _) => n.clone(),
+                (None, false) => "Builds locais (cargo run, cargo install) não se atualizam: use os arquivos de Releases no GitHub.".into(),
+                (None, true) => String::new(),
+            };
+            column![
+                text("Atualizações").size(15),
+                text(format!("Versão instalada: {installed}")).size(13),
+                checkbox(app.auto_update).label("Atualizar automaticamente").on_toggle(Message::SetAutoUpdate).size(14).text_size(13),
+                text("Ao abrir e a cada 6 horas, o brio-git procura uma versão nova no GitHub, baixa e instala em segundo plano. Ela passa a valer quando você reinicia o app.")
+                    .size(12)
+                    .color(p.muted),
+                check,
+                text(note).size(12).color(p.muted),
+            ]
+            .spacing(12)
             .padding(Padding { right: 10.0, ..Padding::ZERO })
             .into()
         }

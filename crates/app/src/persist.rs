@@ -18,6 +18,8 @@ pub struct Saved {
     pub pinned: HashMap<String, String>,
     /// Instruction for AI commit messages; empty means the built-in default.
     pub commit_prompt: String,
+    /// Install new releases in the background.
+    pub auto_update: bool,
 }
 
 impl Default for Saved {
@@ -29,6 +31,7 @@ impl Default for Saved {
             theme: "Dark".into(),
             pinned: HashMap::new(),
             commit_prompt: String::new(),
+            auto_update: true,
         }
     }
 }
@@ -76,6 +79,7 @@ mod tests {
             theme: "Nord".into(),
             pinned,
             commit_prompt: "Só o título, em inglês.".into(),
+            auto_update: false,
         };
         save(&path, &saved).unwrap();
         assert_eq!(load(&path), saved);
