@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Prints the next release version (X.Y.Z) from the Conventional Commits made
-# since the last vX.Y.Z tag, or nothing when there is no commit since it.
+# since the last vX.Y.Z tag (tags of other channels, like egui-vX.Y.Z, are
+# ignored), or nothing when there is no commit since it.
 #
 #   feat:                        -> minor (1.4.2 -> 1.5.0)
 #   type!: / BREAKING CHANGE:    -> major (1.4.2 -> 2.0.0)
@@ -12,6 +13,8 @@
 set -euo pipefail
 
 FIRST="0.1.0"
+# Prefixo das tags de release; outros canais (egui-v…) não contam.
+PREFIX="${TAG_PREFIX:-v}"
 
 # bump <last version> <level: major|minor|patch>
 bump() {
@@ -42,7 +45,7 @@ level() {
 
 next() {
     local tag
-    tag="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || true)"
+    tag="$(git describe --tags --abbrev=0 --match "${PREFIX}[0-9]*.[0-9]*.[0-9]*" 2>/dev/null || true)"
     if [[ -z "$tag" ]]; then
         echo "$FIRST"
         return
@@ -50,7 +53,7 @@ next() {
     if [[ -z "$(git rev-list "$tag..HEAD")" ]]; then
         return # nothing new since the last release
     fi
-    bump "${tag#v}" "$(git log --format='%B%x00' "$tag..HEAD" | level)"
+    bump "${tag#"$PREFIX"}" "$(git log --format='%B%x00' "$tag..HEAD" | level)"
 }
 
 self_test() {
@@ -83,7 +86,7 @@ self_test() {
         git config user.name t && git config user.email t@t && git config commit.gpgsign false && git config tag.gpgsign false
         git commit -q --allow-empty -m "chore: início"
         check "$FIRST" "$(next)" "sem tag"
-        git tag v1.2.3
+        git tag egui-v9.9.9 && git tag "${PREFIX}1.2.3"
         check "" "$(next)" "nada desde a tag"
         git commit -q --allow-empty -m "fix: algo"
         check "1.2.4" "$(next)" "fix após tag"

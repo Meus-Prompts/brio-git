@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Builds target/appimage/brio-git-<version>-x86_64.AppImage.
+# Gera target/appimage/brio-git-<versão>-x86_64.AppImage.
 #
-#   packaging/appimage/build.sh              build with the host toolchain
-#   packaging/appimage/build.sh --container  build inside Debian bookworm
-#                                            (glibc 2.36: runs on most distros)
+#   packaging/appimage/build.sh              build com o toolchain do host
+#   packaging/appimage/build.sh --container  build dentro do Debian bookworm
+#                                            (glibc 2.36: roda na maioria das distros)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -11,22 +11,22 @@ OUT="$ROOT/target/appimage"
 APPDIR="$OUT/brio-git.AppDir"
 TOOLS="$ROOT/target/appimage-tools"
 TOOL="$TOOLS/appimagetool-x86_64.AppImage"
-VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | cut -d'"' -f2)"
+VERSION="${BRIO_VERSION:-$(grep -m1 '^version' "$ROOT/Cargo.toml" | cut -d'"' -f2)}"
 IMAGE="docker.io/library/rust:1-bookworm"
 
 if [[ "${1:-}" == "--container" ]]; then
     ENGINE="$(command -v podman || command -v docker || true)"
     [[ -n "$ENGINE" ]] || { echo "precisa de podman ou docker" >&2; exit 1; }
-    # Separate target dir so the host build cache is not mixed with the container's.
-    "$ENGINE" run --rm -v "$ROOT":/src:Z -w /src -e CARGO_TARGET_DIR=/src/target/container \
-        "$IMAGE" bash -c 'apt-get update -qq && apt-get install -y -qq file >/dev/null && cargo build --release -p brio-git'
+    # target separado para não misturar o cache do host com o do contêiner.
+    "$ENGINE" run --rm -v "$ROOT":/src:Z -w /src -e CARGO_TARGET_DIR=/src/target/container -e BRIO_VERSION="${BRIO_VERSION:-}" \
+        "$IMAGE" bash -c 'apt-get update -qq && apt-get install -y -qq file libxkbcommon-dev libwayland-dev >/dev/null && cargo build --release'
     BIN="$ROOT/target/container/release/brio-git"
 else
-    cargo build --release -p brio-git --manifest-path "$ROOT/Cargo.toml"
+    cargo build --release --manifest-path "$ROOT/Cargo.toml"
     BIN="$ROOT/target/release/brio-git"
 fi
 
-# Fresh AppDir (the path is fixed under target/, never a user directory).
+# AppDir limpo (o caminho é fixo dentro de target/, nunca uma pasta do usuário).
 [[ "$APPDIR" == */target/appimage/brio-git.AppDir ]] && rm -rf -- "$APPDIR"
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" "$APPDIR/usr/share/icons/hicolor/scalable/apps"
 install -m755 "$BIN" "$APPDIR/usr/bin/brio-git"
@@ -44,6 +44,6 @@ if [[ ! -x "$TOOL" ]]; then
     chmod +x "$TOOL"
 fi
 
-# Extract-and-run avoids needing FUSE on the build machine.
+# Extract-and-run dispensa FUSE na máquina de build.
 ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$TOOL" --no-appstream "$APPDIR" "$OUT/brio-git-$VERSION-x86_64.AppImage"
 echo "AppImage: $OUT/brio-git-$VERSION-x86_64.AppImage"

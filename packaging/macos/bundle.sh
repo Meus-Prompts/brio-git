@@ -12,7 +12,7 @@ APP="$OUT/brio-git.app"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | cut -d'"' -f2)"
 
 for target in aarch64-apple-darwin x86_64-apple-darwin; do
-    cargo build --release -p brio-git --target "$target" --manifest-path "$ROOT/Cargo.toml"
+    cargo build --release --target "$target" --manifest-path "$ROOT/Cargo.toml"
 done
 
 # Fresh bundle (the path is fixed under target/, never a user directory).

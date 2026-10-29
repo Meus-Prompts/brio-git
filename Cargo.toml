@@ -1,23 +1,43 @@
-[workspace]
-resolver = "3"
-members = ["crates/core", "crates/ops", "crates/session", "crates/app"]
-
-[workspace.package]
+[package]
+name = "brio-git"
 version = "0.1.0"
 edition = "2024"
+description = "brio-git (variante egui): cliente git gráfico nativo"
 license = "MIT"
 
-[workspace.dependencies]
-brio-core = { path = "crates/core" }
-brio-ops = { path = "crates/ops" }
-brio-session = { path = "crates/session" }
-gix = { version = "0.89", default-features = false, features = ["revision", "sha1", "max-performance-safe"] }
-thiserror = "2"
-anyhow = "1"
-futures = "0.3"
-portable-pty = "0.9"
-alacritty_terminal = "0.26"
+[dependencies]
+eframe = "0.37"
+egui = "0.37"
+egui_extras = "0.37"
+# Só leitura local: rede vai pelo `git` CLI, então sem OpenSSL/libssh2.
+git2 = { version = "0.21", default-features = false }
+rfd = "0.17"
 notify = "8"
-iced = { version = "0.14", features = ["canvas", "tokio", "advanced", "image"] }
-tokio = { version = "1", features = ["rt", "sync"] }
-tempfile = "3"
+chrono = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+anyhow = "1"
+alacritty_terminal = "0.26"
+ureq = { version = "3", features = ["json"] }
+keyring = "4"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+md-5 = "0.10"
+sha2 = "0.11"
+flate2 = "1"
+tar = "0.4"
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+
+[target.'cfg(windows)'.dependencies]
+getrandom = "0.3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[dev-dependencies]
+egui_kittest = { version = "0.37", features = ["eframe", "wgpu", "snapshot"] }

@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=brio-git
-Comment=Cliente Git com sessões de IA
+Comment=Cliente git gráfico
 Exec=brio-git %F
 Icon=brio-git
 Terminal=false
