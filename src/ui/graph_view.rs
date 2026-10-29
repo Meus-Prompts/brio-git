@@ -132,6 +132,7 @@ pub fn show(ui: &mut Ui, tab: &mut RepoTab, settings: &mut Settings, actions: &m
             if let Some((x0, x1)) = cols.author {
                 let r = Rect::from_x_y_ranges(x0..=x1, rect.y_range());
                 crate::ui::avatar(ui, pos2(r.left() + 14.0, r.center().y), 9.0, &commit.initials(), &commit.email, crate::ui::author_color(&commit.author));
+                crate::ui::avatar_tooltip(ui, pos2(r.left() + 14.0, r.center().y), 9.0, &commit.author, &commit.email);
                 let name = crate::ui::elide(ui, &commit.author, &theme::prop(12.0), r.width() - 32.0);
                 ui.painter().text(pos2(r.left() + 28.0, r.center().y), Align2::LEFT_CENTER, name, theme::prop(12.0), theme::p().text);
             }
@@ -196,6 +197,7 @@ pub fn show(ui: &mut Ui, tab: &mut RepoTab, settings: &mut Settings, actions: &m
                 painter.circle_filled(center, 5.0, color);
             } else {
                 crate::ui::avatar(ui, center, 10.0, &commit.initials(), &commit.email, color);
+                crate::ui::avatar_tooltip(ui, center, 10.0, &commit.author, &commit.email);
             }
             if snap.head.oid == Some(commit.id) {
                 painter.circle_stroke(center, 12.5, Stroke::new(1.5, theme::p().text_bright));

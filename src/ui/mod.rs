@@ -119,6 +119,18 @@ pub fn avatar(ui: &Ui, center: egui::Pos2, radius: f32, initials: &str, email: &
     p.text(center, egui::Align2::CENTER_CENTER, initials, theme::prop((radius * 0.8).max(8.0)), theme::p().text_bright);
 }
 
+/// Nome e e-mail do autor ao passar o mouse sobre a foto (pintada, sem widget próprio).
+pub fn avatar_tooltip(ui: &Ui, center: egui::Pos2, radius: f32, name: &str, email: &str) {
+    let Some(pos) = ui.ctx().pointer_hover_pos() else { return };
+    if pos.distance(center) > radius || !ui.clip_rect().contains(pos) || ui.ctx().dragged_id().is_some() {
+        return;
+    }
+    egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), ui.scope_id().with(("avatar_tip", email)), egui::PopupAnchor::Pointer).show(|ui| {
+        ui.label(RichText::new(name).strong().color(theme::p().text_bright));
+        ui.label(RichText::new(email).color(theme::p().text_secondary));
+    });
+}
+
 pub fn author_color(name: &str) -> Color32 {
     let h = name.bytes().fold(5381u32, |h, b| h.wrapping_mul(33) ^ b as u32);
     theme::p().lanes[(h % theme::p().lanes.len() as u32) as usize]
