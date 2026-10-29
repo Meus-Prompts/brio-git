@@ -18,6 +18,9 @@ use egui::{Color32, Key, Rect, Sense, Ui, pos2, vec2};
 
 use crate::theme;
 
+/// Largura da barra de rolagem à direita do terminal.
+const SCROLLBAR_W: f32 = 10.0;
+
 #[derive(Clone)]
 struct Listener {
     ctx: egui::Context,
@@ -145,9 +148,10 @@ impl Terminal {
     pub fn show(&mut self, ui: &mut Ui) {
         let font = theme::mono(13.0);
         let (cw, ch) = ui.ctx().fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
-        let rect = ui.available_rect_before_wrap();
+        let full = ui.available_rect_before_wrap();
+        ui.allocate_rect(full, Sense::hover());
+        let (rect, bar) = full.split_left_right_at_x(full.right() - SCROLLBAR_W);
         let resp = ui.interact(rect, self.id, Sense::click_and_drag());
-        ui.allocate_rect(rect, Sense::hover());
         if resp.clicked() {
             resp.request_focus();
         }
@@ -175,6 +179,35 @@ impl Terminal {
         }
 
         self.paint(ui, rect.shrink2(vec2(4.0, 2.0)), cw, ch, focused);
+        self.scrollbar(ui, bar);
+    }
+
+    /// Barra vertical do histórico (scrollback): clicar ou arrastar posiciona a tela.
+    fn scrollbar(&self, ui: &Ui, bar: Rect) {
+        ui.painter().rect_filled(bar, 0.0, theme::p().app_bg);
+        let mut term = self.term.lock();
+        let history = term.grid().history_size();
+        if history == 0 {
+            return;
+        }
+        let offset = term.grid().display_offset();
+        let track = bar.shrink(2.0);
+        let total = (history + self.size.1) as f32;
+        let thumb_h = (track.height() * self.size.1 as f32 / total).clamp(20.0_f32.min(track.height()), track.height());
+        let free = (track.height() - thumb_h).max(1.0);
+
+        let resp = ui.interact(bar, self.id.with("scrollbar"), Sense::click_and_drag());
+        if let Some(p) = resp.interact_pointer_pos().filter(|_| resp.clicked() || resp.dragged()) {
+            let frac = ((p.y - track.top() - thumb_h / 2.0) / free).clamp(0.0, 1.0);
+            let target = ((1.0 - frac) * history as f32).round() as i32;
+            term.scroll_display(Scroll::Delta(target - offset as i32));
+        }
+
+        let offset = term.grid().display_offset();
+        let top = track.top() + free * (1.0 - offset as f32 / history as f32);
+        let thumb = Rect::from_min_size(pos2(track.left(), top), vec2(track.width(), thumb_h));
+        let color = if resp.dragged() || resp.hovered() { theme::p().text_secondary } else { theme::p().text_disabled };
+        ui.painter().rect_filled(thumb, track.width() / 2.0, color);
     }
 
     fn handle_input(&self, ui: &Ui) {
