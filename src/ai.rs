@@ -83,7 +83,13 @@ pub fn generate(repo: &Path, tool: Tool) -> Result<(String, String)> {
     } else {
         Command::new(&exe)
     };
-    let last_msg = std::env::temp_dir().join(format!("brio-git-codex-{}.txt", std::process::id()));
+    // No cache do próprio usuário, e não no /tmp compartilhado: lá outro usuário
+    // poderia criar a pasta antes, com um `.claude/` dentro, ou trocar o arquivo
+    // de saída por um link. A pasta fica vazia, então nenhuma config de projeto
+    // (`.claude/`, `.gemini/`) do repositório é carregada.
+    let workdir = dirs::cache_dir().ok_or_else(|| anyhow!("pasta de cache do usuário não encontrada"))?.join("brio-git").join("ai");
+    std::fs::create_dir_all(&workdir)?;
+    let last_msg = workdir.join(format!("codex-{}.txt", std::process::id()));
     match tool {
         // Só a configuração do usuário e nenhuma ferramenta: a resposta é texto puro.
         Tool::Claude => cmd.args(["-p", "--setting-sources", "user", "--tools", ""]),
@@ -91,10 +97,6 @@ pub fn generate(repo: &Path, tool: Tool) -> Result<(String, String)> {
         // A saída do `codex exec` mistura progresso; a resposta final vai para o arquivo.
         Tool::Codex => cmd.args(["exec", "--sandbox", "read-only", "--skip-git-repo-check", "-o"]).arg(&last_msg).arg("-"),
     };
-    // Fora do repo: `.claude/`, `.gemini/` e afins de um repositório de terceiros
-    // não são carregados (hooks e permissões rodariam comandos arbitrários).
-    let workdir = std::env::temp_dir().join(format!("brio-git-ai-{}", std::process::id()));
-    std::fs::create_dir_all(&workdir)?;
     cmd.current_dir(&workdir);
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
