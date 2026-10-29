@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=brio-git
+Comment=Cliente git gráfico (variante egui)
+Exec=brio-git %F
+Icon=brio-git
+Terminal=false
+Categories=Development;RevisionControl;
+StartupWMClass=brio-git
