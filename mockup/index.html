@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>brio-git mockup</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Barra de título: logo, abas de repositório, configurações e botões da janela -->
+    <header class="titlebar">
+      <div class="logo"><span class="logo-badge ic" data-icon="GIT_GRAPH"></span><b>brio</b><span class="muted">git</span></div>
+      <nav class="repo-tabs" id="repo-tabs"></nav>
+      <div class="drag"></div>
+      <button class="ghost icon-btn" id="toggle-layout" data-tip="Alternar entre o estilo padrão e o minimalista (Alt+M)"><span class="ic" data-icon="LAYOUT"></span></button>
+      <button class="ghost icon-btn" id="open-settings" title="Configurações"><span class="ic" data-icon="SETTINGS"></span></button>
+      <button class="win-btn">—</button><button class="win-btn">▢</button><button class="win-btn">✕</button>
+    </header>
+
+    <!-- Barra de ferramentas -->
+    <div class="toolbar bar" id="toolbar"></div>
+
+    <!-- Painéis: branches/reflog | grafo | alterações, com a sessão de IA embaixo -->
+    <main class="body" id="body">
+      <div class="split rows" id="root">
+        <div class="split cols" style="flex: 64 1 0">
+          <div class="split rows" style="flex: 16 1 0">
+            <section class="pane" data-kind="sidebar" style="flex: 60 1 0"></section>
+            <section class="pane" data-kind="reflog" style="flex: 40 1 0"></section>
+          </div>
+          <section class="pane" data-kind="graph" style="flex: 52 1 0"></section>
+          <section class="pane" data-kind="details" style="flex: 32 1 0"></section>
+        </div>
+        <section class="pane" data-kind="session" style="flex: 36 1 0"></section>
+      </div>
+    </main>
+
+    <!-- Rodapé -->
+    <footer class="statusbar" id="statusbar"></footer>
+  </div>
+
+  <div id="overlay"></div>
+
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,398 @@
+/* Mock visual do brio-git. As cores vêm do tema ativo (app.js grava as variáveis
+   em :root); os nomes seguem o Palette de crates/app/src/style.rs. */
+
+@font-face {
+  font-family: "lucide";
+  src: url("assets/lucide.ttf") format("truetype");
+}
+
+:root {
+  /* Tema Dark, substituído pelo tema escolhido. */
+  --bg: #1b1e24; --panel: #21252c; --panel-alt: #262b33; --title: #15171c; --border: #333944;
+  --text: #d7dae0; --muted: #8a93a3; --accent: #4fb3ff; --selected: #2c3a4f; --added: #98c379;
+  --removed: #e06c75; --hunk: #56b6c2; --warn: #e5c07b; --purple: #c678dd; --orange: #d19a66; --term-bg: #17191e;
+
+  /* Medidas: ajuste aqui para testar densidade. */
+  --font: system-ui, -apple-system, "Segoe UI", "Noto Sans", sans-serif;
+  --mono: ui-monospace, "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", monospace;
+  --radius: 6px;
+  --gap: 4px;
+  --row-h: 30px;
+  --lane-w: 26px;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--text); font: 13px/1.35 var(--font); overflow: hidden; }
+button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+.muted { color: var(--muted); }
+.mono { font-family: var(--mono); }
+
+.ic { font-family: "lucide"; font-style: normal; line-height: 1; display: inline-block; }
+
+#app { display: flex; flex-direction: column; height: 100vh; }
+
+/* ---------- Barra de título ---------- */
+.titlebar {
+  height: 38px; flex: none; display: flex; align-items: center; gap: 10px; padding: 0 10px;
+  background: var(--title);
+}
+.logo { display: flex; align-items: center; gap: 8px; font-size: 15px; }
+.logo b { font-weight: 600; margin-right: -8px; }
+.logo-badge {
+  width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center;
+  font-size: 13px; color: #fff; background: linear-gradient(225deg, var(--accent), var(--purple));
+}
+.repo-tabs { display: flex; align-items: center; gap: 2px; }
+.repo-tab { display: flex; align-items: center; border-radius: 6px; border: 1px solid transparent; }
+.repo-tab.active { background: var(--panel-alt); border-color: var(--accent); }
+.repo-tab .name { padding: 4px 8px; color: var(--muted); }
+.repo-tab.active .name { color: var(--text); }
+.repo-tab .dot { font-size: 11px; color: var(--warn); }
+.repo-tab .dot.working { color: var(--added); animation: pulse 1.2s ease-in-out infinite; }
+.repo-tab .x { font-size: 11px; padding: 2px 6px; color: var(--muted); border-radius: 4px; }
+.repo-tab .x:hover { background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--text); }
+.add-tab { font-size: 16px; padding: 2px 10px; color: var(--muted); }
+.drag { flex: 1; align-self: stretch; }
+.win-btn { font-size: 14px; padding: 4px 14px; color: var(--text); border-radius: 4px; }
+.win-btn:hover { background: color-mix(in srgb, var(--text) 8%, transparent); }
+.win-btn:last-child:hover { background: var(--removed); color: #fff; }
+
+@keyframes pulse { 50% { opacity: 0.25; } }
+
+/* ---------- Botões ---------- */
+.ghost { border-radius: 6px; padding: 4px 9px; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+.ghost:hover { background: color-mix(in srgb, var(--text) 8%, transparent); }
+.ghost:active { background: color-mix(in srgb, var(--text) 14%, transparent); }
+.ghost:disabled { color: color-mix(in srgb, var(--muted) 40%, transparent); background: none; cursor: default; }
+.ghost .ic { font-size: 14px; }
+.icon-btn { padding: 5px 7px; }
+.pill {
+  font-size: 10px; padding: 0 6px; border-radius: 8px;
+  color: var(--c, var(--accent)); background: color-mix(in srgb, var(--c, var(--accent)) 18%, transparent);
+}
+.chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 6px; color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.chip:hover { background: color-mix(in srgb, var(--accent) 20%, transparent); }
+.soft {
+  --c: var(--accent);
+  display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 6px; font-size: 13px; color: var(--c);
+  background: color-mix(in srgb, var(--c) 12%, transparent); border: 1px solid color-mix(in srgb, var(--c) 35%, transparent);
+}
+.soft:hover { background: color-mix(in srgb, var(--c) 20%, transparent); border-color: color-mix(in srgb, var(--c) 55%, transparent); }
+.primary { background: var(--accent); color: var(--bg); border-radius: 4px; padding: 6px 14px; font-size: 14px; }
+.primary:disabled { opacity: 0.45; cursor: default; }
+.secondary { background: var(--panel-alt); border: 1px solid var(--border); border-radius: 4px; padding: 4px 10px; font-size: 12px; }
+.secondary.on { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+.text-btn { border-radius: 4px; padding: 3px 6px; text-align: left; }
+.text-btn:hover { background: color-mix(in srgb, var(--text) 7%, transparent); }
+.text-btn.sel { background: var(--selected); }
+
+/* ---------- Barra de ferramentas ---------- */
+.bar { background: var(--panel-alt); border: 1px solid var(--border); }
+.toolbar { flex: none; display: flex; align-items: center; gap: 4px; padding: 5px 10px; border-left: 0; border-right: 0; }
+.divider { width: 1px; height: 16px; background: var(--border); margin: 0 2px; }
+
+/* ---------- Painéis ---------- */
+.body { flex: 1; min-height: 0; padding: var(--gap); position: relative; }
+.split { display: flex; min-width: 0; min-height: 0; }
+.split.rows { flex-direction: column; }
+.split.cols { flex-direction: row; }
+#root { height: 100%; }
+.gutter { flex: 0 0 var(--gap); }
+.split.cols > .gutter { cursor: col-resize; }
+.split.rows > .gutter { cursor: row-resize; }
+.gutter:hover, .gutter.dragging { background: color-mix(in srgb, var(--accent) 40%, transparent); }
+[hidden] { display: none !important; }
+
+.pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel); border: 1px solid var(--border); }
+.pane.maximized { position: absolute; inset: var(--gap); z-index: 5; }
+.pane-title {
+  flex: none; display: flex; align-items: center; gap: 7px; padding: 3px 8px; font-size: 12px; color: var(--muted);
+  background: var(--panel-alt); border-bottom: 1px solid var(--border);
+}
+.pane-title .grip { font-size: 11px; opacity: 0.6; cursor: grab; }
+.pane-title .ic { font-size: 12px; }
+.pane-title .controls { margin-left: auto; display: flex; gap: 2px; }
+.pane-title .controls button { padding: 3px 5px; border-radius: 6px; }
+.pane-title .controls button:hover { background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--text); }
+.pane-body { flex: 1; min-height: 0; overflow: auto; }
+
+/* ---------- Branches ---------- */
+.refs { padding: 8px; display: flex; flex-direction: column; gap: 2px; }
+.section-head { font-size: 11px; color: var(--muted); padding: 3px 2px; text-align: left; letter-spacing: 0.02em; }
+.ref { padding: 3px 14px; width: 100%; text-align: left; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ref:hover { background: color-mix(in srgb, var(--text) 7%, transparent); }
+.ref.head { color: var(--accent); font-weight: 700; background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.stash { padding: 3px 14px; text-align: left; border-radius: 4px; }
+.stash:hover { background: color-mix(in srgb, var(--text) 7%, transparent); }
+.stash small { display: block; font-size: 11px; color: var(--muted); }
+.spacer8 { height: 8px; }
+
+/* ---------- Reflog ---------- */
+.reflog { padding: 6px; display: flex; flex-direction: column; gap: 1px; }
+.reflog-item { padding: 5px 8px; border-radius: 4px; text-align: left; width: 100%; }
+.reflog-item:hover { background: color-mix(in srgb, var(--text) 7%, transparent); }
+.reflog-item.sel { background: var(--selected); }
+.reflog-head { display: flex; align-items: center; gap: 6px; font-size: 11px; margin-bottom: 3px; }
+.reflog-head .when { margin-left: auto; color: var(--muted); white-space: nowrap; }
+.badge svg { color: var(--muted); }
+.badge.current svg { color: var(--bg); }
+.reflog-msg { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---------- Grafo ---------- */
+.graph { position: relative; min-width: 100%; }
+.graph > svg { position: absolute; left: 0; top: 0; pointer-events: none; }
+.g-row {
+  height: var(--row-h); display: flex; align-items: center; gap: 0; cursor: default; white-space: nowrap; padding-right: 12px;
+}
+.g-row:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
+.g-row.head { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.g-row.sel { background: var(--selected); }
+.g-row .summary { flex: 1; min-width: 40px; overflow: hidden; text-overflow: ellipsis; }
+.g-row.head .summary { font-weight: 600; }
+.g-row .hash { width: 76px; padding-left: 10px; font-family: var(--mono); color: var(--accent); flex: none; }
+.g-row .who { width: 120px; padding-left: 12px; color: var(--muted); flex: none; overflow: hidden; text-overflow: ellipsis; }
+.g-row .lanes { flex: none; align-self: stretch; }
+.g-row .date { width: 96px; padding-left: 12px; color: var(--muted); flex: none; }
+.g-row.wip .summary { font-style: italic; color: var(--muted); }
+.g-row.wip.sel .summary { color: var(--text); }
+.badge {
+  --c: var(--muted);
+  height: 20px; display: inline-flex; align-items: center; gap: 4px; padding: 0 6px; margin-right: 6px; border-radius: 4px; flex: none;
+  background: color-mix(in srgb, var(--c) 22%, transparent); border: 1px solid var(--c); font-size: 12px;
+}
+.badge .ic { font-size: 11px; color: var(--muted); }
+.badge.current { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 700; }
+.badge.current .ic { color: var(--bg); }
+.badge.more { --c: var(--muted); border-color: color-mix(in srgb, var(--muted) 60%, transparent); }
+
+/* ---------- Alterações ---------- */
+.details { padding: 10px; display: flex; flex-direction: column; gap: 10px; }
+.details-wrap { display: flex; flex-direction: column; height: 100%; }
+.details-wrap > .pane-scroll { flex: 1; min-height: 0; overflow: auto; }
+.list-head { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); }
+.list-head .title { flex: 1; }
+.list-head .mode { font-size: 11px; padding: 2px 8px; border-radius: 4px; }
+.list-head .mode.on { background: var(--accent); color: var(--bg); }
+.file { display: flex; align-items: center; }
+.file .text-btn { flex: 1; display: flex; gap: 4px; min-width: 0; }
+.file .letter { font-family: var(--mono); font-size: 12px; width: 14px; flex: none; }
+.file .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file .act { font-family: var(--mono); font-size: 14px; padding: 0 6px; color: var(--muted); }
+.file .act:hover { color: var(--text); }
+.commit-box { padding: 10px; display: flex; flex-direction: column; gap: 6px; border-left: 0; border-right: 0; border-bottom: 0; }
+.commit-box .label { font-size: 11px; color: var(--muted); }
+.input, .textarea {
+  font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 4px; padding: 6px; width: 100%;
+}
+.input:focus, .textarea:focus { outline: none; border-color: var(--accent); }
+.textarea { height: 80px; resize: none; }
+.row { display: flex; align-items: center; gap: 8px; }
+.row .grow { flex: 1; }
+.check { display: inline-flex; align-items: center; gap: 6px; }
+.check input { accent-color: var(--accent); }
+.commit-header { display: flex; flex-direction: column; gap: 6px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+.commit-header .hash { font-family: var(--mono); font-size: 12px; color: var(--muted); text-align: left; padding: 0; }
+.commit-header h2 { font-size: 16px; margin: 0; }
+.author { display: flex; align-items: center; gap: 10px; margin-top: 4px; }
+.author small { display: block; font-size: 12px; color: var(--muted); }
+.avatar {
+  width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; font-weight: 600; color: #fff; flex: none;
+}
+
+/* ---------- Sessão de IA ---------- */
+.session { padding: 8px; display: flex; flex-direction: column; gap: 6px; height: 100%; }
+.session-bar { display: flex; align-items: center; gap: 10px; }
+.session-tabs { display: flex; gap: 4px; flex: 1; overflow-x: auto; }
+.s-tab { display: flex; align-items: center; gap: 6px; padding: 3px 4px 3px 9px; border-radius: 6px; border: 1px solid transparent; color: var(--muted); }
+.s-tab.active { background: var(--panel-alt); border-color: var(--accent); color: var(--text); }
+.s-tab .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--warn); }
+.s-tab .dot.working { background: var(--added); animation: pulse 1.2s ease-in-out infinite; }
+.s-tab .dot.exited { background: var(--muted); }
+.s-tab .x { font-size: 11px; padding: 1px 5px; border-radius: 4px; }
+.s-tab .x:hover { background: color-mix(in srgb, var(--text) 8%, transparent); }
+.select {
+  font: inherit; font-size: 13px; color: var(--text); background: var(--panel); border: 1px solid var(--border);
+  border-radius: 6px; padding: 4px 8px;
+}
+.session-actions { display: flex; align-items: center; gap: 4px; flex: none; }
+.soft.icon-only { padding: 5px 8px; }
+.soft.icon-only .ic { font-size: 14px; }
+.soft:disabled { opacity: 0.4; cursor: default; background: none; }
+
+/* Tooltip no estilo popover do app; abre embaixo, alinhado à direita do botão. */
+[data-tip] { position: relative; }
+[data-tip]:hover::after {
+  content: attr(data-tip); position: absolute; top: calc(100% + 6px); right: 0; z-index: 10;
+  width: max-content; max-width: 260px; padding: 5px 9px; border-radius: 8px; white-space: normal;
+  font: 12px/1.35 var(--font); color: var(--text); text-align: left; pointer-events: none;
+  background: var(--panel-alt); border: 1px solid var(--border); box-shadow: 0 6px 18px rgb(0 0 0 / 0.4);
+}
+
+.session-info { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); }
+.session-info .grow { flex: 1; }
+.session-info .soft { padding: 3px 10px; font-size: 12px; }
+.terminal {
+  flex: 1; min-height: 0; overflow: auto; margin: 0; padding: 6px; background: var(--term-bg); border: 1px solid transparent;
+  font: 13px/17px var(--mono); color: var(--text); white-space: pre;
+}
+.terminal.focused { border-color: var(--accent); }
+.terminal ::selection { background: color-mix(in srgb, var(--accent) 35%, transparent); }
+.t-dim { color: var(--muted); } .t-acc { color: var(--accent); } .t-ok { color: var(--added); }
+.t-warn { color: var(--warn); } .t-err { color: var(--removed); } .t-bold { font-weight: 700; }
+.cursor { background: color-mix(in srgb, var(--accent) 55%, transparent); }
+
+/* ---------- Rodapé ---------- */
+.statusbar {
+  flex: none; display: flex; align-items: center; gap: 12px; padding: 3px 10px; font-size: 12px; color: var(--muted);
+  background: var(--title); border-top: 1px solid var(--border);
+}
+.statusbar .toggles { display: flex; align-items: center; gap: 2px; }
+.statusbar .toggle { padding: 3px 7px; border-radius: 4px; color: color-mix(in srgb, var(--muted) 70%, transparent); }
+.statusbar .toggle.open { color: var(--text); }
+.statusbar .toggle:hover { background: color-mix(in srgb, var(--text) 8%, transparent); }
+.statusbar .divider { height: 14px; }
+.statusbar .grow { flex: 1; }
+.statusbar .item { display: inline-flex; align-items: center; gap: 6px; }
+.statusbar .counter { padding: 2px 7px; border-radius: 4px; }
+.statusbar .counter:hover { background: color-mix(in srgb, var(--text) 8%, transparent); }
+.statusbar .counter .ic { color: var(--added); }
+.statusbar .version { font-size: 11px; opacity: 0.8; }
+
+/* ---------- Configurações (modal) ---------- */
+.backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.45); display: grid; place-items: center; z-index: 20; }
+.modal {
+  width: min(860px, 92vw); height: min(560px, 86vh); display: flex; flex-direction: column;
+  background: var(--panel-alt); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 18px rgb(0 0 0 / 0.4);
+}
+.modal-head { display: flex; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--border); font-size: 18px; }
+.modal-head .grow { flex: 1; }
+.modal-main { flex: 1; min-height: 0; display: flex; }
+.modal-nav { width: 190px; padding: 10px; display: flex; flex-direction: column; gap: 2px; border-right: 1px solid var(--border); }
+.modal-nav button { display: flex; gap: 8px; align-items: center; padding: 6px 10px; border-radius: 6px; text-align: left; }
+.modal-nav button.on { background: var(--selected); }
+.modal-content { flex: 1; overflow: auto; padding: 16px; }
+.layouts { display: flex; gap: 8px; margin-bottom: 22px; }
+.layouts .secondary { font-size: 13px; padding: 6px 14px; }
+.modal-content h3 { font-size: 15px; font-weight: 400; margin: 0 0 12px; }
+.themes { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
+.theme-card {
+  display: flex; flex-direction: column; gap: 8px; align-items: center; padding: 8px; border-radius: 6px;
+  background: var(--panel); border: 1px solid var(--border);
+}
+.theme-card:hover { background: var(--panel-alt); }
+.theme-card.on { border: 2px solid var(--accent); color: var(--accent); }
+.theme-preview { width: 100%; height: 80px; border-radius: 4px; display: flex; overflow: hidden; border: 1px solid; }
+.theme-preview .side { width: 26px; }
+.theme-preview .lines { padding: 10px 12px; display: flex; flex-direction: column; gap: 5px; }
+.theme-preview .lines i { height: 4px; border-radius: 2px; display: block; }
+
+/* ---------- Toast ---------- */
+.toast {
+  position: fixed; right: 16px; bottom: 36px; z-index: 30; padding: 8px 12px; border-radius: 8px; font-size: 13px;
+  background: var(--panel-alt); border: 1px solid var(--border); border-left: 3px solid var(--added);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.4);
+}
+
+/* =====================================================================
+   Modo minimalista (body.minimal, Alt+M). Só sobrescreve o que está acima:
+   tira bordas e fundos, apaga o que é secundário e deixa os controles
+   aparecerem só quando o mouse chega perto.
+   ===================================================================== */
+
+.minimal {
+  --row-h: 26px;
+  --gap: 1px;
+  /* Tons mais discretos derivados do tema ativo. */
+  --faint: color-mix(in srgb, var(--muted) 55%, transparent);
+  --hair: color-mix(in srgb, var(--border) 55%, transparent);
+  --wash: color-mix(in srgb, var(--text) 4%, transparent);
+}
+
+/* Barras: tudo sobre o mesmo fundo, separado só por uma linha fina. */
+.minimal .titlebar,
+.minimal .toolbar,
+.minimal .statusbar { background: var(--bg); border-color: var(--hair); }
+.minimal .titlebar { height: 34px; }
+.minimal .toolbar { border-top: 0; border-bottom: 1px solid var(--hair); padding: 3px 10px; }
+.minimal .toolbar .divider { background: transparent; width: 8px; }
+.minimal .toolbar .ghost { color: var(--muted); }
+.minimal .toolbar .ghost:hover { color: var(--text); background: var(--wash); }
+.minimal .toolbar .chip { background: transparent; border-color: transparent; }
+.minimal .toolbar .chip:hover { background: var(--wash); }
+.minimal .toolbar .pill { background: transparent; padding: 0 2px; }
+.minimal .statusbar { border-top: 1px solid var(--hair); color: var(--faint); }
+.minimal .statusbar .toggle { color: var(--faint); }
+.minimal .statusbar .toggle.open { color: var(--muted); }
+.minimal .logo-badge { background: transparent; color: var(--muted); }
+.minimal .logo b { font-weight: 500; }
+.minimal .repo-tab.active { background: transparent; border-color: transparent; }
+.minimal .repo-tab.active .name { color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); border-radius: 0; }
+.minimal .repo-tab .x { opacity: 0; }
+.minimal .repo-tab:hover .x { opacity: 1; }
+.minimal .win-btn { color: var(--muted); }
+
+/* Painéis: sem caixa; a divisória é uma linha de 1px. */
+.minimal .body { padding: 0; }
+.minimal .pane { background: var(--bg); border: 0; }
+.minimal .gutter { background: var(--hair); }
+.minimal .gutter:hover, .minimal .gutter.dragging { background: var(--accent); }
+.minimal .pane-title {
+  background: transparent; border: 0; padding: 6px 12px 2px; font-size: 11px;
+  color: var(--faint); text-transform: uppercase; letter-spacing: 0.06em;
+}
+.minimal .pane-title { gap: 6px; }
+.minimal .pane-title .ic:not(.grip) { font-size: 11px; }
+.minimal .pane-title .grip,
+.minimal .pane-title .controls { opacity: 0; transition: opacity 0.15s; }
+.minimal .pane:hover .pane-title .grip,
+.minimal .pane:hover .pane-title .controls { opacity: 1; }
+
+/* Listas: seleção e hover suaves, sem negrito gritante. */
+.minimal .section-head { color: var(--faint); letter-spacing: 0.06em; }
+.minimal .ref.head { background: transparent; font-weight: 600; }
+.minimal .text-btn.sel,
+.minimal .reflog-item.sel,
+.minimal .g-row.sel { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.minimal .reflog-item .pill { background: transparent; padding: 0; }
+.minimal .reflog-head .mono:first-child { display: none; } /* HEAD@{n} é ruído */
+
+/* Grafo. */
+.minimal .g-row.head { background: transparent; }
+.minimal .g-row:hover { background: var(--wash); }
+.minimal .g-row .hash { color: var(--faint); font-size: 12px; }
+.minimal .g-row .date { color: var(--faint); font-size: 12px; }
+.minimal .g-row .who { color: var(--faint); font-size: 12px; }
+.minimal .g-row.head .summary { font-weight: 500; }
+.minimal .badge {
+  height: 18px; padding: 0 5px; margin-right: 8px; font-size: 11px;
+  border: 0; background: color-mix(in srgb, var(--c) 14%, transparent); color: var(--c);
+}
+.minimal .badge.current { background: transparent; color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); font-weight: 600; }
+.minimal .badge.current svg, .minimal .badge.current .ic { color: var(--accent); }
+.minimal .badge .ic, .minimal .badge svg { display: none; }
+
+/* Alterações. */
+.minimal .secondary { background: transparent; border-color: var(--hair); }
+.minimal .secondary.on { background: transparent; color: var(--accent); border-color: var(--accent); }
+.minimal .list-head .mode.on { background: transparent; color: var(--text); }
+.minimal .file .act { opacity: 0; }
+.minimal .file:hover .act { opacity: 1; }
+.minimal .commit-box { background: transparent; border-top: 1px solid var(--hair); }
+.minimal .input, .minimal .textarea { background: transparent; border-color: var(--hair); }
+.minimal .commit-header { border-color: var(--hair); }
+.minimal .avatar { width: 28px; height: 28px; font-size: 11px; }
+
+/* Sessão de IA. */
+.minimal .terminal { background: var(--bg); }
+.minimal .terminal.focused { border-color: transparent; box-shadow: inset 2px 0 0 var(--accent); }
+.minimal .s-tab.active { background: transparent; border-color: transparent; box-shadow: inset 0 -2px 0 var(--accent); border-radius: 0; }
+.minimal .s-tab .x { opacity: 0; }
+.minimal .s-tab:hover .x { opacity: 1; }
+.minimal .soft { background: transparent; border-color: transparent; color: var(--muted); }
+.minimal .soft:hover { color: var(--c); background: color-mix(in srgb, var(--c) 10%, transparent); }
+.minimal .select { background: transparent; border-color: transparent; color: var(--muted); }
+.minimal .session-info { color: var(--faint); }
