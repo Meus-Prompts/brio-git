@@ -31,6 +31,9 @@ bump() {
 level() {
     local level="patch" message subject
     while IFS= read -r -d '' message; do
+        # `git log --format=%B%x00` separa os commits com "\n": a partir do
+        # segundo, a mensagem começa com quebras de linha.
+        message="${message#"${message%%[!$'\n']*}"}"
         subject="${message%%$'\n'*}"
         if [[ "$subject" =~ ^[a-zA-Z]+(\([^\)]*\))?!: ]] || [[ "$message" == *"BREAKING CHANGE:"* || "$message" == *"BREAKING-CHANGE:"* ]]; then
             echo major
@@ -76,6 +79,7 @@ self_test() {
     check "major" "$(msgs $'feat: x\n\nBREAKING CHANGE: remove y' | level)" "rodapé breaking"
     check "patch" "$(msgs 'feature: não é feat' 'Merge branch x' | level)" "não conventional"
     check "patch" "$(printf '' | level)" "sem commits"
+    check "minor" "$(printf 'fix: novo\n\0\nfeat: antigo\n\0' | level)" "feat que não é o commit mais recente"
 
     # End to end in a scratch repository.
     local dir
