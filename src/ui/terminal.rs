@@ -73,6 +73,9 @@ pub struct Terminal {
     listener: Listener,
     size: (usize, usize),
     id: egui::Id,
+    /// Fração de linha da roda do mouse ainda não aplicada (o scroll suave
+    /// chega em poucos pixels por quadro).
+    scroll_acc: f32,
     /// Número sequencial da aba ("Terminal 2").
     pub seq: u32,
 }
@@ -104,7 +107,7 @@ impl Terminal {
         let sender = event_loop.channel();
         *listener.sender.lock().unwrap() = Some(sender.clone());
         event_loop.spawn();
-        Ok(Self { term, notifier: Notifier(sender), listener, size: (cols, lines), id: egui::Id::unique(("terminal", cwd, seq)), seq })
+        Ok(Self { term, notifier: Notifier(sender), listener, size: (cols, lines), id: egui::Id::unique(("terminal", cwd, seq)), scroll_acc: 0.0, seq })
     }
 
     pub fn exited(&self) -> bool {
@@ -141,6 +144,12 @@ impl Terminal {
         out
     }
 
+    /// Linhas do histórico acima da tela visível (0 = no fim).
+    #[cfg(test)]
+    pub fn display_offset(&self) -> usize {
+        self.term.lock().grid().display_offset()
+    }
+
     fn write(&self, bytes: impl Into<Vec<u8>>) {
         self.notifier.notify(bytes.into());
     }
@@ -172,14 +181,49 @@ impl Terminal {
             self.handle_input(ui);
         }
         if resp.hovered() {
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll.abs() > 0.5 {
-                self.term.lock().scroll_display(Scroll::Delta((scroll / ch).round() as i32));
+            self.scroll_acc += ui.input(|i| i.smooth_scroll_delta.y) / ch;
+            let lines = self.scroll_acc.trunc() as i32;
+            if lines != 0 {
+                self.scroll_acc -= lines as f32;
+                let pointer = ui.input(|i| i.pointer.hover_pos()).unwrap_or(rect.min);
+                let cell = ((pointer.x - rect.left() - 4.0) / cw, (pointer.y - rect.top() - 2.0) / ch);
+                self.wheel(lines, (cell.0.max(0.0) as usize, cell.1.max(0.0) as usize));
             }
+        } else {
+            self.scroll_acc = 0.0;
         }
 
         self.paint(ui, rect.shrink2(vec2(4.0, 2.0)), cw, ch, focused);
         self.scrollbar(ui, bar);
+    }
+
+    /// Roda do mouse (`lines` > 0 = para cima). Como num terminal de verdade:
+    /// app com mouse reporting recebe os cliques 64/65; app em tela alternativa
+    /// (que não tem histórico) recebe setas; senão rola o histórico.
+    fn wheel(&self, lines: i32, (col, row): (usize, usize)) {
+        let mut term = self.term.lock();
+        let mode = *term.mode();
+        if mode.intersects(TermMode::MOUSE_MODE) {
+            drop(term);
+            let button = if lines > 0 { 64 } else { 65 };
+            let (col, row) = (col.min(self.size.0 - 1) + 1, row.min(self.size.1 - 1) + 1);
+            let report = if mode.contains(TermMode::SGR_MOUSE) {
+                format!("\x1b[<{button};{col};{row}M").into_bytes()
+            } else {
+                // Codificação X10: só cabe até a coluna/linha 223.
+                vec![0x1b, b'[', b'M', 32 + button, 32 + col.min(223) as u8, 32 + row.min(223) as u8]
+            };
+            for _ in 0..lines.unsigned_abs() {
+                self.write(report.clone());
+            }
+        } else if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
+            drop(term);
+            let dir = if lines > 0 { b'A' } else { b'B' };
+            let arrow = if mode.contains(TermMode::APP_CURSOR) { [0x1b, b'O', dir] } else { [0x1b, b'[', dir] };
+            self.write(arrow.repeat(lines.unsigned_abs() as usize));
+        } else {
+            term.scroll_display(Scroll::Delta(lines));
+        }
     }
 
     /// Barra vertical do histórico (scrollback): clicar ou arrastar posiciona a tela.

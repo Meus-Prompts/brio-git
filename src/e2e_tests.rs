@@ -345,6 +345,56 @@ fn e2e_integrated_terminal_runs_commands_in_repo() {
     c.shot("10_terminal");
 }
 
+#[test]
+fn e2e_terminal_wheel_scrolls_history_and_reaches_tui_apps() {
+    let mut c = setup("terminal_scroll");
+    let settings = c.harness.state().settings.clone();
+    c.tab().handle(crate::repo_tab::Action::ToggleTerminal, &settings);
+    c.harness.step();
+    let inside = pos2(W / 2.0, H - 80.0);
+    c.click(inside);
+    let run = |c: &mut Ctx, cmd: &str, expect: &str| {
+        c.harness.event(Event::Text(cmd.into()));
+        c.harness.key_press(egui::Key::Enter);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            c.harness.step();
+            let text = c.tab().terminals[0].screen_text();
+            // Linha inteira: o comando digitado também aparece na tela.
+            if text.lines().any(|l| l.trim() == expect) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "esperava a linha {expect:?} no terminal:\n{text}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    // Roda o mouse em vários passos pequenos, como um trackpad/scroll suave.
+    let wheel = |c: &mut Ctx, dy: f32| {
+        c.harness.event(Event::PointerMoved(inside));
+        for _ in 0..20 {
+            c.harness.event(Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, dy),
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Unknown,
+                modifiers: Modifiers::NONE,
+            });
+            c.harness.step();
+        }
+        c.harness.run_steps(10);
+    };
+
+    run(&mut c, "seq 1 400", "400");
+    wheel(&mut c, 6.0);
+    assert!(c.tab().terminals[0].display_offset() > 0, "a roda do mouse deve subir no histórico");
+
+    // App de tela cheia com mouse reporting (SGR): a roda vai para o app.
+    run(&mut c, "printf '\\033[?1049h\\033[?1000h\\033[?1006hTUI\\n'; cat", "TUI");
+    wheel(&mut c, 6.0);
+    let text = c.tab().terminals[0].screen_text();
+    assert!(text.contains("[<64;"), "roda para cima deve chegar ao app como botão 64:\n{text}");
+}
+
 impl Ctx {
     fn drag(&mut self, from: Pos2, to: Pos2) {
         self.harness.event(Event::PointerMoved(from));
