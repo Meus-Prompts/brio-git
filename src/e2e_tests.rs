@@ -1017,7 +1017,7 @@ fn e2e_preferences_tabs_and_system_theme() {
 
     // Janela centralizada.
     let screen = c.harness.ctx.content_rect();
-    let win = c.harness.ctx.memory(|m| m.area_rect(egui::Id::new("prefs_window"))).expect("janela de preferências");
+    let win = c.harness.ctx.memory(|m| m.area_rect(egui::Id::unique("prefs_window"))).expect("janela de preferências");
     assert!((win.center().x - screen.center().x).abs() < 2.0 && (win.center().y - screen.center().y).abs() < 2.0, "{win:?} não está no centro de {screen:?}");
 }
 

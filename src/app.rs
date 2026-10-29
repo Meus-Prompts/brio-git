@@ -731,7 +731,7 @@ impl BrioApp {
         // Sempre centralizada e com tamanho fixo: grupos em abas à esquerda.
         let size = vec2(760.0, 500.0).min(ctx.content_rect().size() - vec2(40.0, 80.0));
         egui::Window::new("Preferences")
-            .id(egui::Id::new("prefs_window"))
+            .id(egui::Id::unique("prefs_window"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
