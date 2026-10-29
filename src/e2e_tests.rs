@@ -1032,3 +1032,14 @@ fn e2e_panel_sizes_are_remembered() {
     c.harness.run_steps(3);
     assert_eq!(c.harness.state().settings.layout.left, Some(321.0));
 }
+
+#[test]
+fn e2e_layout_is_saved_as_soon_as_it_settles() {
+    let mut c = setup("layout_save");
+    c.harness.state_mut().settings.layout.terminal = Some(333.0);
+    c.harness.run_steps(2);
+    std::thread::sleep(super::LAYOUT_SETTLE);
+    c.harness.run_steps(2);
+    // Sem esperar o autosave: o próximo repositório aberto já parte daqui.
+    assert_eq!(crate::settings::Settings::load().layout.terminal, Some(333.0));
+}

@@ -188,6 +188,14 @@ impl Settings {
         }
     }
 
+    /// Grava só o `layout`, mantendo o resto do arquivo: qualquer janela (também
+    /// as secundárias) pode gravar, e o próximo repositório aberto herda.
+    pub fn save_layout(layout: &Layout) {
+        let mut s = Self::load();
+        s.layout = layout.clone();
+        s.save();
+    }
+
     pub fn touch_recent(&mut self, path: &Path) {
         self.recent.retain(|p| p != path);
         self.recent.insert(0, path.to_path_buf());

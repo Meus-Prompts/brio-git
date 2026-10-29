@@ -244,7 +244,16 @@ pub struct BrioApp {
     last_update_check: Option<Instant>,
     /// Tema aplicado ao egui (o fixo, ou o claro/escuro do sistema).
     applied_theme: String,
+    /// Último layout gravado em disco por esta janela.
+    saved_layout: crate::settings::Layout,
+    /// Layout ainda não gravado e quando mudou pela última vez.
+    pending_layout: Option<(crate::settings::Layout, Instant)>,
+    /// Muda a cada "Restaurar tamanhos" para o egui esquecer os tamanhos dos painéis.
+    panel_gen: u32,
 }
+
+/// Espera o layout parar de mudar (arraste, redimensionar janela) antes de gravar.
+const LAYOUT_SETTLE: Duration = Duration::from_millis(400);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PrefsSection {
@@ -334,6 +343,9 @@ impl BrioApp {
             update_note: None,
             last_update_check: None,
             applied_theme,
+            saved_layout: settings.layout.clone(),
+            pending_layout: None,
+            panel_gen: 0,
             settings,
         };
         let restore: Vec<PathBuf> = if args.is_empty() { app.settings.open_tabs.clone() } else { args };
@@ -395,7 +407,7 @@ impl BrioApp {
             })
             .collect();
         self.settings.active_tab = self.active;
-        self.settings.save();
+        self.save_settings();
     }
 
     fn active_repo(&mut self) -> Option<&mut RepoTab> {
@@ -433,10 +445,40 @@ impl BrioApp {
         }
     }
 
+    /// Grava o layout assim que o usuário termina de ajustá-lo (soltou o mouse
+    /// e nada mudou por [`LAYOUT_SETTLE`]).
+    fn persist_layout(&mut self, ctx: &egui::Context) {
+        if self.settings.layout == self.saved_layout {
+            self.pending_layout = None;
+            return;
+        }
+        let now = Instant::now();
+        if self.pending_layout.as_ref().is_none_or(|(l, _)| *l != self.settings.layout) {
+            self.pending_layout = Some((self.settings.layout.clone(), now));
+        }
+        let settled = self.pending_layout.as_ref().is_some_and(|(_, t)| now - *t >= LAYOUT_SETTLE);
+        if settled && !ctx.input(|i| i.pointer.any_down()) {
+            crate::settings::Settings::save_layout(&self.settings.layout);
+            self.saved_layout = self.settings.layout.clone();
+            self.pending_layout = None;
+        } else {
+            ctx.request_repaint_after(LAYOUT_SETTLE);
+        }
+    }
+
+    /// Grava as preferências sem desfazer um layout mais novo gravado por outra janela.
+    fn save_settings(&self) {
+        let mut s = self.settings.clone();
+        if s.layout == self.saved_layout {
+            s.layout = crate::settings::Settings::load().layout;
+        }
+        s.save();
+    }
+
     fn zoom(&mut self, ctx: &egui::Context, z: f32) {
         self.settings.zoom = z.clamp(0.6, 2.0);
         ctx.set_zoom_factor(self.settings.zoom);
-        self.settings.save();
+        self.save_settings();
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
@@ -660,14 +702,14 @@ impl BrioApp {
                     ui.set_min_width(220.0);
                     if ui.selectable_label(self.settings.active_profile.is_none(), "Default Profile (gitconfig)").clicked() {
                         self.settings.active_profile = None;
-                        self.settings.save();
+                        self.save_settings();
                         ui.close();
                     }
                     for (i, p) in self.settings.profiles.iter().enumerate() {
                         let text = format!("{} — {}", p.label, p.email);
                         if ui.selectable_label(self.settings.active_profile == Some(i), text).clicked() {
                             self.settings.active_profile = Some(i);
-                            self.settings.save();
+                            self.save_settings();
                             ui.close();
                         }
                     }
@@ -790,8 +832,9 @@ impl BrioApp {
                                 ui.add_space(6.0);
                                 ui.checkbox(&mut s.custom_titlebar, "Barra de título própria (sem decorações do sistema) — vale ao reiniciar");
                                 ui.add_space(6.0);
-                                if ui.button("Restaurar tamanhos dos painéis").on_hover_text("Volta as larguras do painel esquerdo, do detalhe e a altura do terminal ao padrão (vale ao reiniciar).").clicked() {
+                                if ui.button("Restaurar tamanhos dos painéis").on_hover_text("Volta as larguras do painel esquerdo, do detalhe e a altura do terminal ao padrão.").clicked() {
                                     s.layout = crate::settings::Layout { window: s.layout.window, maximized: s.layout.maximized, ..Default::default() };
+                                    self.panel_gen += 1;
                                 }
                             }
                             PrefsSection::Graph => {
@@ -933,7 +976,7 @@ impl BrioApp {
         }
         if !open {
             self.prefs = None;
-            self.settings.save();
+            self.save_settings();
             let settings = self.settings.clone();
             for t in &mut self.tabs {
                 if let Tab::Repo(r) = t {
@@ -1116,14 +1159,14 @@ impl BrioApp {
                     (false, _) => self.settings.theme = id.to_string(),
                 }
                 self.sync_theme(ctx);
-                self.settings.save();
+                self.save_settings();
             }
         }
     }
 
     fn repo_ui(&mut self, ui: &mut Ui, ctx: &egui::Context, actions: &mut Vec<Action>, app_req: &mut Vec<AppRequest>) {
         let recent = self.settings.recent.clone();
-        let (show_left, show_right) = (self.show_left, self.show_right);
+        let (show_left, show_right, panel_gen) = (self.show_left, self.show_right, self.panel_gen);
         let settings = &mut self.settings;
         let Some(Tab::Repo(tab)) = self.tabs.get_mut(self.active) else { return };
 
@@ -1135,7 +1178,7 @@ impl BrioApp {
         // depois de arrastar, vale o tamanho salvo.
         let width = ui.available_width();
         if show_left {
-            let r = Panel::left("left_panel")
+            let r = Panel::left(("left_panel", panel_gen))
                 .resizable(true)
                 .default_size(settings.layout.left.unwrap_or((width * 0.18).clamp(170.0, 260.0)))
                 .size_range(150.0..=500.0)
@@ -1144,7 +1187,7 @@ impl BrioApp {
             remember_size(&mut settings.layout.left, r.response.rect.width());
         }
         if show_right && tab.rebase.is_none() {
-            let r = Panel::right("detail_panel")
+            let r = Panel::right(("detail_panel", panel_gen))
                 .resizable(true)
                 .default_size(settings.layout.right.unwrap_or((width * 0.28).clamp(260.0, 420.0)))
                 .size_range(240.0..=800.0)
@@ -1159,7 +1202,7 @@ impl BrioApp {
             tab.new_terminal();
         }
         if tab.terminal_open && !tab.terminals.is_empty() {
-            let r = Panel::bottom("terminal")
+            let r = Panel::bottom(("terminal", panel_gen))
                 .resizable(true)
                 .default_size(settings.layout.terminal.unwrap_or(260.0))
                 .min_size(80.0)
@@ -1281,8 +1324,9 @@ impl eframe::App for BrioApp {
 
         if self.primary && self.last_save.elapsed() > Duration::from_secs(10) {
             self.last_save = Instant::now();
-            self.settings.save();
+            self.save_settings();
         }
+        self.persist_layout(&ctx);
         // Mantém autofetch/relógios vivos mesmo sem input.
         ctx.request_repaint_after(Duration::from_secs(5));
         let _ = pos2;
