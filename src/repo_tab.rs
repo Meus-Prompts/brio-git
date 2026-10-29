@@ -144,6 +144,8 @@ pub enum Action {
     DiscardAll,
     ApplyPatch { patch: String, mode: PatchMode },
     Commit { stage_all: bool },
+    /// Preenche summary/description com o CLI de IA local.
+    GenerateMessage(crate::ai::Tool),
     Checkout(String),
     CheckoutCommit(Oid),
     CheckoutRemote(String),
@@ -240,6 +242,8 @@ pub struct RepoTab {
     pub amend: bool,
     pub push_after_commit: bool,
     pub skip_hooks: bool,
+    /// Geração da mensagem de commit pela IA em andamento.
+    pub ai_pending: Option<crate::ai::Pending>,
     pub dialog: Option<Dialog>,
     pub undo: Vec<UndoEntry>,
     pub redo: Vec<UndoEntry>,
@@ -334,6 +338,7 @@ impl RepoTab {
             amend: false,
             push_after_commit: false,
             skip_hooks: false,
+            ai_pending: None,
             dialog: None,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -445,6 +450,19 @@ impl RepoTab {
         }
 
         self.hosting_tick();
+        if let Some((tool, rx)) = &self.ai_pending
+            && let Ok(res) = rx.try_recv()
+        {
+            let tool = *tool;
+            self.ai_pending = None;
+            match res {
+                Ok((summary, body)) => {
+                    self.wip_summary = summary;
+                    self.wip_body = body;
+                }
+                Err(e) => self.dialog = Some(Dialog::Error { title: format!("{} falhou", tool.label()), message: format!("{e:#}") }),
+            }
+        }
         for done in self.jobs.poll() {
             self.on_job_done(done);
             self.reload(settings);
@@ -702,6 +720,16 @@ impl RepoTab {
                 self.spawn(label, None, move |p| ops::apply_patch(p, &patch, mode));
             }
             Action::Commit { stage_all } => self.do_commit(stage_all, settings.profile().map(|p| (p.name.clone(), p.email.clone()))),
+            Action::GenerateMessage(tool) => {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let path = self.path.clone();
+                let ctx = self.ctx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(crate::ai::generate(&path, tool));
+                    ctx.request_repaint();
+                });
+                self.ai_pending = Some((tool, rx));
+            }
             Action::Checkout(name) => {
                 let undo = self.current_ref_name().map(|to| UndoEntry::Checkout { to });
                 self.spawn(&format!("Checkout {name}"), undo, move |p| ops::checkout(p, &name));

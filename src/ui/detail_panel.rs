@@ -253,6 +253,7 @@ fn commit_box(ui: &mut Ui, tab: &mut RepoTab, snap: &Snapshot, actions: &mut Vec
                     tab.wip_summary = head.summary.clone();
                     tab.wip_body = head.body.clone();
                 }
+                ai_button(ui, tab, snap, actions);
             });
         });
         let len = tab.wip_summary.chars().count();
@@ -299,6 +300,37 @@ fn commit_box(ui: &mut Ui, tab: &mut RepoTab, snap: &Snapshot, actions: &mut Vec
         );
         if resp.clicked() && enabled {
             actions.push(Action::Commit { stage_all });
+        }
+    });
+}
+
+/// Botão "IA": só aparece com algum CLI de IA instalado; com mais de um, vira menu.
+fn ai_button(ui: &mut Ui, tab: &RepoTab, snap: &Snapshot, actions: &mut Vec<Action>) {
+    let tools = crate::ai::available();
+    if tools.is_empty() {
+        return;
+    }
+    if let Some((tool, _)) = &tab.ai_pending {
+        ui.label(RichText::new(format!("Gerando com {}…", tool.label())).small().color(theme::p().text_secondary));
+        ui.spinner();
+        return;
+    }
+    let has_changes = !snap.status.staged.is_empty() || !snap.status.unstaged.is_empty();
+    ui.add_enabled_ui(has_changes, |ui| {
+        if let [(tool, _)] = tools {
+            if ui.small_button("IA").on_hover_text(format!("Gerar summary e description com {}", tool.label())).clicked() {
+                actions.push(Action::GenerateMessage(*tool));
+            }
+        } else {
+            ui.menu_button("IA", |ui| {
+                for (tool, _) in tools {
+                    if ui.button(format!("Gerar com {}", tool.label())).clicked() {
+                        actions.push(Action::GenerateMessage(*tool));
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Gerar summary e description com a IA local");
         }
     });
 }

@@ -1,6 +1,7 @@
 // GUI no Windows: sem janela de console atrás do app.
 #![windows_subsystem = "windows"]
 
+mod ai;
 mod app;
 mod askpass;
 mod avatars;
