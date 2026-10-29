@@ -32,13 +32,14 @@ fn main() -> eframe::Result {
         let _ = git2::opts::set_verify_owner_validation(false);
     }
     update::cleanup();
-    let custom_titlebar = settings::Settings::load().custom_titlebar;
+    let saved = settings::Settings::load();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("brio-git")
-            .with_decorations(!custom_titlebar)
+            .with_decorations(!saved.custom_titlebar)
             .with_app_id("brio-git")
-            .with_inner_size([1400.0, 900.0])
+            .with_inner_size(saved.layout.window.unwrap_or([1400.0, 900.0]))
+            .with_maximized(saved.layout.maximized)
             .with_min_inner_size([900.0, 560.0]),
         ..Default::default()
     };

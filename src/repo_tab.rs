@@ -158,6 +158,8 @@ pub enum Action {
     DeleteRemoteTag(String),
     Merge(String),
     FastForward { branch: String, to: Oid },
+    /// Move um branch que não é o atual para `to` (`git branch -f`).
+    ResetBranchTo { branch: String, to: Oid },
     Rebase(String),
     MergeInto { source: String, target: String },
     ShowDropMenu { source: DragRef, target: DragRef, pos: egui::Pos2 },
@@ -751,6 +753,9 @@ impl RepoTab {
                 } else {
                     self.spawn(&format!("Fast-forward {branch}"), None, move |p| ops::move_branch(p, &branch, &to.to_string()));
                 }
+            }
+            Action::ResetBranchTo { branch, to } => {
+                self.spawn(&format!("Reset {branch}"), None, move |p| ops::move_branch(p, &branch, &to.to_string()));
             }
             Action::ShowDropMenu { source, target, pos } => self.drop_menu = Some(DropMenu { source, target, pos }),
             Action::MergeInto { source, target } => {

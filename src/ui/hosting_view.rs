@@ -24,63 +24,57 @@ fn state_badge(ui: &mut Ui, pr: &PullRequest) {
     });
 }
 
-/// Seções "PULL REQUESTS"/"MERGE REQUESTS" e "GITHUB ISSUES"/"GITLAB ISSUES".
+/// Itens de GitHub/GitLab para o menu de contexto da seção REMOTE: com as
+/// seções de PR/issue ocultas quando vazias, conectar e criar ficam aqui.
+pub fn remote_menu(tab: &RepoTab) -> Vec<(String, Action)> {
+    let Some(h) = &tab.hosting else { return Vec::new() };
+    let kind = h.repo.kind;
+    let repo = &h.repo;
+    if h.connected.is_none() {
+        return vec![(format!("Conectar ao {} ({})", kind.label(), repo.host), Action::OpenDialog(Dialog::ConnectHosting { token: Default::default() }))];
+    }
+    vec![
+        (format!("Create {}", kind.pr_noun()), Action::OpenDialog(create_pr_dialog(tab, None))),
+        ("Create issue".into(), Action::OpenDialog(Dialog::CreateIssue { title: String::new(), body: String::new() })),
+        (format!("Refresh {}", kind.label()), act(H::Refresh)),
+        (format!("Open {} in browser", repo.path), act(H::OpenUrl(format!("{}/{}", repo.web, repo.path)))),
+        (format!("Fork {} on {}", repo.path, kind.label()), act(H::Fork)),
+        (format!("Disconnect from {}", repo.host), act(H::Disconnect)),
+    ]
+}
+
+/// Seções "PULL REQUESTS"/"MERGE REQUESTS" e "GITHUB ISSUES"/"GITLAB ISSUES",
+/// mostradas só quando há itens abertos (ou um erro a reportar).
 pub fn left_sections(ui: &mut Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) {
     let Some(h) = &tab.hosting else { return };
+    if h.connected.is_none() {
+        return;
+    }
     let kind = h.repo.kind;
     let pr_title = match kind {
         crate::hosting::Kind::GitHub => "PULL REQUESTS",
         crate::hosting::Kind::GitLab => "MERGE REQUESTS",
     };
     let issues_title = format!("{} ISSUES", kind.label().to_uppercase());
+    let show_prs = has_data(&h.prs);
+    let show_issues = has_data(&h.issues);
     let pr_count = h.prs.as_ref().and_then(|r| r.as_ref().ok()).map(Vec::len).unwrap_or(0);
     let issue_count = h.issues.as_ref().and_then(|r| r.as_ref().ok()).map(Vec::len).unwrap_or(0);
-    let connected = h.connected.is_some();
     let prefix = kind.pr_prefix();
-    let repo = h.repo.clone();
     let prs = h.prs.clone();
     let issues = h.issues.clone();
-    let loading = h.loading;
+    let menu = remote_menu(tab);
 
-    let open = !tab.collapsed.contains(pr_title);
-    let resp = crate::ui::section_header(ui, pr_title, open, Some(pr_count));
-    if resp.clicked() {
-        toggle(tab, pr_title);
-    }
-    resp.context_menu(|ui| {
-        if ui.button(format!("Create {}", kind.pr_noun())).clicked() {
-            actions.push(Action::OpenDialog(create_pr_dialog(tab, None)));
-            ui.close();
+    if show_prs {
+        let open = !tab.collapsed.contains(pr_title);
+        let resp = crate::ui::section_header(ui, pr_title, open, Some(pr_count));
+        if resp.clicked() {
+            toggle(tab, pr_title);
         }
-        if ui.button("Refresh").clicked() {
-            actions.push(act(H::Refresh));
-            ui.close();
-        }
-        if ui.button(format!("Open {} in browser", repo.path)).clicked() {
-            actions.push(act(H::OpenUrl(format!("{}/{}", repo.web, repo.path))));
-            ui.close();
-        }
-        if connected && ui.button(format!("Fork {} on {}", repo.path, kind.label())).clicked() {
-            actions.push(act(H::Fork));
-            ui.close();
-        }
-        if connected && ui.button(format!("Disconnect from {}", repo.host)).clicked() {
-            actions.push(act(H::Disconnect));
-            ui.close();
-        }
-    });
-    if open {
-        if !connected {
-            connect_row(ui, &repo, actions);
-        } else if loading && prs.is_none() {
-            ui.horizontal(|ui| {
-                ui.add_space(26.0);
-                ui.spinner();
-            });
-        } else {
+        resp.context_menu(|ui| menu_items(ui, &menu, actions));
+        if open {
             match &prs {
                 Some(Err(e)) => error_row(ui, e, actions),
-                Some(Ok(list)) if list.is_empty() => hint_row(ui, &format!("Nenhum {} aberto", kind.pr_noun().to_lowercase())),
                 Some(Ok(list)) => {
                     for pr in list {
                         pr_row(ui, tab, pr, prefix, actions);
@@ -91,25 +85,18 @@ pub fn left_sections(ui: &mut Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) 
         }
     }
 
+    if !show_issues {
+        return;
+    }
     let open = !tab.collapsed.contains(&issues_title);
     let resp = crate::ui::section_header(ui, &issues_title, open, Some(issue_count));
     if resp.clicked() {
         toggle(tab, &issues_title);
     }
-    resp.context_menu(|ui| {
-        if ui.button("Create issue").clicked() {
-            actions.push(Action::OpenDialog(Dialog::CreateIssue { title: String::new(), body: String::new() }));
-            ui.close();
-        }
-        if ui.button("Refresh").clicked() {
-            actions.push(act(H::Refresh));
-            ui.close();
-        }
-    });
-    if open && connected {
+    resp.context_menu(|ui| menu_items(ui, &menu, actions));
+    if open {
         match &issues {
             Some(Err(e)) => error_row(ui, e, actions),
-            Some(Ok(list)) if list.is_empty() => hint_row(ui, "Nenhuma issue aberta"),
             Some(Ok(list)) => {
                 for issue in list {
                     let selected = matches!(&tab.center, Some(CenterView::Issue(v)) if v.number == issue.number);
@@ -137,6 +124,20 @@ pub fn left_sections(ui: &mut Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) 
                 }
             }
             None => {}
+        }
+    }
+}
+
+/// Há itens abertos ou um erro a reportar.
+fn has_data<T>(r: &Option<Result<Vec<T>, String>>) -> bool {
+    r.as_ref().is_some_and(|l| l.as_ref().map_or(true, |l| !l.is_empty()))
+}
+
+pub fn menu_items(ui: &mut Ui, items: &[(String, Action)], actions: &mut Vec<Action>) {
+    for (label, a) in items {
+        if ui.button(label).clicked() {
+            actions.push(a.clone());
+            ui.close();
         }
     }
 }
@@ -194,15 +195,6 @@ fn pr_row(ui: &mut Ui, tab: &RepoTab, pr: &PullRequest, prefix: &str, actions: &
     });
 }
 
-fn connect_row(ui: &mut Ui, repo: &crate::hosting::RemoteRepo, actions: &mut Vec<Action>) {
-    ui.horizontal(|ui| {
-        ui.add_space(26.0);
-        if ui.button(format!("Conectar ao {} ({})", repo.kind.label(), repo.host)).clicked() {
-            actions.push(Action::OpenDialog(Dialog::ConnectHosting { token: Default::default() }));
-        }
-    });
-}
-
 fn error_row(ui: &mut Ui, e: &str, actions: &mut Vec<Action>) {
     ui.horizontal_wrapped(|ui| {
         ui.add_space(26.0);
@@ -213,13 +205,6 @@ fn error_row(ui: &mut Ui, e: &str, actions: &mut Vec<Action>) {
         if e.contains("401") && ui.small_button("Reconectar").clicked() {
             actions.push(Action::OpenDialog(Dialog::ConnectHosting { token: Default::default() }));
         }
-    });
-}
-
-fn hint_row(ui: &mut Ui, text: &str) {
-    ui.horizontal(|ui| {
-        ui.add_space(26.0);
-        ui.label(RichText::new(text).small().color(theme::p().text_disabled));
     });
 }
 

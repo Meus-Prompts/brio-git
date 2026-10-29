@@ -34,6 +34,18 @@ impl Default for Columns {
     }
 }
 
+/// Tamanhos que o usuário ajustou arrastando; `None` = proporcional à janela.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Layout {
+    pub left: Option<f32>,
+    pub right: Option<f32>,
+    pub terminal: Option<f32>,
+    /// Tamanho interno da janela em pixels lógicos (sem o zoom do app).
+    pub window: Option<[f32; 2]>,
+    pub maximized: bool,
+}
+
 /// Identidade usada nos commits feitos pelo brio-git (não altera o gitconfig).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Profile {
@@ -73,6 +85,11 @@ pub struct Settings {
     pub show_avatars: bool,
     /// Atualização automática pelas Releases do GitHub.
     pub auto_update: bool,
+    pub layout: Layout,
+    /// Alterna entre `theme_light` e `theme_dark` conforme o tema do sistema.
+    pub follow_system_theme: bool,
+    pub theme_light: String,
+    pub theme_dark: String,
 }
 
 impl Default for Settings {
@@ -100,6 +117,10 @@ impl Default for Settings {
             custom_titlebar: true,
             show_avatars: true,
             auto_update: true,
+            layout: Layout::default(),
+            follow_system_theme: false,
+            theme_light: "light".into(),
+            theme_dark: "dark".into(),
         }
     }
 }
@@ -111,6 +132,15 @@ fn file() -> Option<PathBuf> {
 impl Settings {
     pub fn profile(&self) -> Option<&Profile> {
         self.active_profile.and_then(|i| self.profiles.get(i)).filter(|p| !p.name.trim().is_empty() && !p.email.trim().is_empty())
+    }
+
+    /// Tema a aplicar: o fixo, ou o par claro/escuro seguindo o sistema.
+    pub fn effective_theme(&self, system: Option<egui::Theme>) -> &str {
+        match (self.follow_system_theme, system) {
+            (true, Some(egui::Theme::Light)) => &self.theme_light,
+            (true, Some(egui::Theme::Dark)) => &self.theme_dark,
+            _ => &self.theme,
+        }
     }
 
     pub fn load() -> Self {
@@ -203,6 +233,24 @@ pub fn release_primary() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_theme_follows_the_system_only_when_enabled() {
+        let mut s = Settings { theme: "dracula".into(), theme_light: "catppuccin-latte".into(), theme_dark: "nord".into(), ..Default::default() };
+        assert_eq!(s.effective_theme(Some(egui::Theme::Light)), "dracula");
+        s.follow_system_theme = true;
+        assert_eq!(s.effective_theme(Some(egui::Theme::Light)), "catppuccin-latte");
+        assert_eq!(s.effective_theme(Some(egui::Theme::Dark)), "nord");
+        assert_eq!(s.effective_theme(None), "dracula", "sistema sem preferência = tema fixo");
+    }
+
+    #[test]
+    fn old_settings_without_layout_still_load() {
+        let s: Settings = serde_json::from_str(r#"{"theme":"nord"}"#).unwrap();
+        assert_eq!(s.layout, Layout::default());
+        assert!(!s.follow_system_theme);
+        assert_eq!((s.theme_light.as_str(), s.theme_dark.as_str()), ("light", "dark"));
+    }
 
     #[test]
     fn imports_state_from_the_iced_version() {

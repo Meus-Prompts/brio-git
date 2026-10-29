@@ -72,6 +72,54 @@ fn window_controls(ui: &mut Ui, ctx: &egui::Context) {
 }
 
 /// Amostra do tema: fundo + 5 cores de lane.
+/// Aba "Temas": um tema fixo, ou um par claro/escuro que segue o sistema.
+fn themes_page(ui: &mut Ui, s: &mut Settings) {
+    ui.checkbox(&mut s.follow_system_theme, "Seguir o tema do sistema (claro e escuro)")
+        .on_hover_text("Usa o tema claro ou o escuro escolhidos abaixo conforme a preferência de aparência do sistema operacional.");
+    ui.add_space(8.0);
+    let all = theme::themes();
+    let (light, dark): (Vec<_>, Vec<_>) = all.iter().partition(|(id, _)| theme::is_light_theme(id));
+    if s.follow_system_theme {
+        ui.columns(2, |cols| {
+            cols[0].label(RichText::new("Tema claro").strong());
+            for (id, name) in &light {
+                theme_choice(&mut cols[0], id, name, &mut s.theme_light);
+            }
+            cols[1].label(RichText::new("Tema escuro").strong());
+            for (id, name) in &dark {
+                theme_choice(&mut cols[1], id, name, &mut s.theme_dark);
+            }
+        });
+    } else {
+        ui.columns(2, |cols| {
+            cols[0].label(RichText::new("Escuros").strong());
+            for (id, name) in &dark {
+                theme_choice(&mut cols[0], id, name, &mut s.theme);
+            }
+            cols[1].label(RichText::new("Claros").strong());
+            for (id, name) in &light {
+                theme_choice(&mut cols[1], id, name, &mut s.theme);
+            }
+        });
+    }
+}
+
+fn theme_choice(ui: &mut Ui, id: &str, name: &str, selected: &mut String) {
+    ui.horizontal(|ui| {
+        theme_swatch(ui, id);
+        if ui.selectable_label(selected == id, name).clicked() {
+            *selected = id.to_string();
+        }
+    });
+}
+
+/// Guarda o tamanho de um painel quando o usuário o redimensiona.
+fn remember_size(slot: &mut Option<f32>, size: f32) {
+    if size > 1.0 && slot.is_none_or(|s| (s - size).abs() > 0.5) {
+        *slot = Some(size.round());
+    }
+}
+
 fn theme_swatch(ui: &mut Ui, id: &str) {
     let (rect, _) = ui.allocate_exact_size(vec2(54.0, 14.0), Sense::hover());
     let current = theme::p().id;
@@ -194,9 +242,39 @@ pub struct BrioApp {
     update_state: Option<crate::update::Outcome>,
     update_note: Option<String>,
     last_update_check: Option<Instant>,
+    /// Tema aplicado ao egui (o fixo, ou o claro/escuro do sistema).
+    applied_theme: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PrefsSection {
+    General,
+    Graph,
+    Themes,
+    GitProfile,
+    AppProfiles,
+    Integrations,
+    Updates,
+}
+
+impl PrefsSection {
+    const ALL: [PrefsSection; 7] = [Self::General, Self::Graph, Self::Themes, Self::GitProfile, Self::AppProfiles, Self::Integrations, Self::Updates];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::General => "Geral",
+            Self::Graph => "Grafo",
+            Self::Themes => "Temas",
+            Self::GitProfile => "Perfil Git",
+            Self::AppProfiles => "Perfis do app",
+            Self::Integrations => "Integrações",
+            Self::Updates => "Atualizações",
+        }
+    }
 }
 
 struct Prefs {
+    section: PrefsSection,
     name: String,
     email: String,
     sign: bool,
@@ -233,7 +311,8 @@ impl BrioApp {
     pub fn new(cc: &eframe::CreationContext<'_>, args: Vec<PathBuf>) -> Self {
         theme::install_fonts(&cc.egui_ctx);
         let settings = Settings::load();
-        theme::apply(&cc.egui_ctx, &settings.theme);
+        let applied_theme = settings.effective_theme(cc.egui_ctx.system_theme()).to_string();
+        theme::apply(&cc.egui_ctx, &applied_theme);
         crate::avatars::init(&cc.egui_ctx, settings.show_avatars);
         cc.egui_ctx.set_zoom_factor(settings.zoom);
         let mut app = Self {
@@ -254,6 +333,7 @@ impl BrioApp {
             update_state: None,
             update_note: None,
             last_update_check: None,
+            applied_theme,
             settings,
         };
         let restore: Vec<PathBuf> = if args.is_empty() { app.settings.open_tabs.clone() } else { args };
@@ -322,6 +402,34 @@ impl BrioApp {
         match self.tabs.get_mut(self.active) {
             Some(Tab::Repo(r)) => Some(r),
             _ => None,
+        }
+    }
+
+    /// Reaplica o tema quando a escolha ou o tema do sistema muda.
+    fn sync_theme(&mut self, ctx: &egui::Context) {
+        let want = self.settings.effective_theme(ctx.system_theme());
+        if want != self.applied_theme {
+            self.applied_theme = want.to_string();
+            theme::apply(ctx, want);
+        }
+    }
+
+    /// Guarda tamanho e estado maximizado da janela para a próxima abertura.
+    fn remember_window(&mut self, ctx: &egui::Context) {
+        let (inner, maximized, fullscreen) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.inner_rect, v.maximized, v.fullscreen)
+        });
+        if let Some(m) = maximized {
+            self.settings.layout.maximized = m;
+        }
+        if maximized == Some(true) || fullscreen == Some(true) {
+            return;
+        }
+        if let Some(r) = inner {
+            // Rects do egui vêm em pontos (já com o zoom do app); a janela usa pixels lógicos.
+            let z = ctx.zoom_factor();
+            self.settings.layout.window = Some([(r.width() * z).round(), (r.height() * z).round()]);
         }
     }
 
@@ -606,6 +714,7 @@ impl BrioApp {
         let dir = self.active_repo().map(|r| r.path.clone()).unwrap_or_else(|| PathBuf::from("."));
         let fmt = ops::config_get(&dir, "gpg.format");
         self.prefs = Some(Prefs {
+            section: PrefsSection::General,
             name: ops::config_get(&dir, "user.name"),
             email: ops::config_get(&dir, "user.email"),
             sign: ops::config_get(&dir, "commit.gpgsign") == "true",
@@ -619,156 +728,195 @@ impl BrioApp {
         let mut open = true;
         let mut save_profile = false;
         let mut check_now = false;
-        egui::Window::new("Preferences").open(&mut open).collapsible(false).resizable(false).default_width(460.0).show(ctx, |ui| {
-            ui.heading("Perfil Git (global)");
-            egui::Grid::new("prefs_profile").num_columns(2).show(ui, |ui| {
-                ui.label("Nome");
-                ui.text_edit_singleline(&mut p.name);
-                ui.end_row();
-                ui.label("Email");
-                ui.text_edit_singleline(&mut p.email);
-                ui.end_row();
-            });
-            ui.add_space(6.0);
-            ui.label(RichText::new("Assinatura de commits").strong());
-            ui.checkbox(&mut p.sign, "Assinar commits por padrão (commit.gpgsign)");
-            ui.horizontal(|ui| {
-                ui.label("Formato");
-                egui::ComboBox::from_id_salt("sign_format").selected_text(p.sign_format.as_str()).show_ui(ui, |ui| {
-                    for f in ["openpgp", "ssh", "x509"] {
-                        ui.selectable_value(&mut p.sign_format, f.to_string(), f);
-                    }
-                });
-            });
-            ui.horizontal(|ui| {
-                ui.label("Chave");
-                ui.add(egui::TextEdit::singleline(&mut p.signing_key).hint_text(if p.sign_format == "ssh" { "~/.ssh/id_ed25519.pub" } else { "ID da chave GPG" }));
-            });
-            if ui.button("Salvar perfil e assinatura").clicked() {
-                save_profile = true;
-            }
-            ui.separator();
-            ui.heading("Perfis do brio-git");
-            ui.label(RichText::new("Identidades usadas nos commits feitos pelo app, sem alterar o gitconfig.").small().color(theme::p().text_secondary));
-            let mut remove = None;
-            for (i, prof) in self.settings.profiles.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut prof.label).hint_text("Trabalho").desired_width(90.0));
-                    ui.add(egui::TextEdit::singleline(&mut prof.name).hint_text("Nome").desired_width(120.0));
-                    ui.add(egui::TextEdit::singleline(&mut prof.email).hint_text("email").desired_width(150.0));
-                    if icons::button(ui, Icon::Close, 18.0, "Remover perfil").clicked() {
-                        remove = Some(i);
-                    }
-                });
-            }
-            if let Some(i) = remove {
-                self.settings.profiles.remove(i);
-                self.settings.active_profile = match self.settings.active_profile {
-                    Some(a) if a == i => None,
-                    Some(a) if a > i => Some(a - 1),
-                    other => other,
-                };
-            }
-            if ui.button("+ Adicionar perfil").clicked() {
-                self.settings.profiles.push(crate::settings::Profile { label: format!("Perfil {}", self.settings.profiles.len() + 1), ..Default::default() });
-            }
-            ui.separator();
-            ui.heading("Integrações (GitHub / GitLab)");
-            ui.label(
-                RichText::new("github.com, gitlab.com e hosts com \"github\"/\"gitlab\" no nome são detectados sozinhos. Cadastre aqui outros hosts Enterprise/self-hosted.")
-                    .small()
-                    .color(theme::p().text_secondary),
-            );
-            let mut remove_host = None;
-            for (i, h) in self.settings.hosting_hosts.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut h.host).hint_text("git.empresa.com").desired_width(150.0));
-                    egui::ComboBox::from_id_salt(("host_kind", i)).selected_text(h.kind.label()).width(80.0).show_ui(ui, |ui| {
-                        ui.selectable_value(&mut h.kind, crate::hosting::Kind::GitHub, "GitHub");
-                        ui.selectable_value(&mut h.kind, crate::hosting::Kind::GitLab, "GitLab");
+        // Sempre centralizada e com tamanho fixo: grupos em abas à esquerda.
+        let size = vec2(760.0, 500.0).min(ctx.content_rect().size() - vec2(40.0, 80.0));
+        egui::Window::new("Preferences")
+            .id(egui::Id::new("prefs_window"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .movable(false)
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .fixed_size(size)
+            .show(ctx, |ui| {
+                ui.horizontal_top(|ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(150.0);
+                        for sec in PrefsSection::ALL {
+                            let selected = p.section == sec;
+                            let (rect, resp) = ui.allocate_exact_size(vec2(150.0, 30.0), Sense::click());
+                            let fill = if selected { theme::p().selected_row } else if resp.hovered() { theme::p().hover_row } else { egui::Color32::TRANSPARENT };
+                            ui.painter().rect_filled(rect, 4.0, fill);
+                            let color = if selected { theme::p().text_bright } else { theme::p().text };
+                            ui.painter().text(rect.left_center() + vec2(12.0, 0.0), Align2::LEFT_CENTER, sec.label(), theme::prop(13.0), color);
+                            resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, selected, sec.label()));
+                            if resp.clicked() {
+                                p.section = sec;
+                            }
+                        }
                     });
-                    ui.add(egui::TextEdit::singleline(&mut h.api).hint_text("API (opcional)").desired_width(160.0));
-                    if icons::button(ui, Icon::Close, 18.0, "Remover host").clicked() {
-                        remove_host = Some(i);
-                    }
-                });
-            }
-            if let Some(i) = remove_host {
-                self.settings.hosting_hosts.remove(i);
-            }
-            if ui.button("+ Adicionar host").clicked() {
-                self.settings.hosting_hosts.push(crate::hosting::HostConfig { host: String::new(), kind: crate::hosting::Kind::GitLab, api: String::new() });
-            }
-            ui.separator();
-            ui.heading("Atualizações");
-            ui.horizontal(|ui| {
-                let installed = if crate::update::enabled() { format!("v{}", crate::update::VERSION) } else { "dev (build local, não se atualiza)".into() };
-                ui.label(format!("Versão instalada: {installed}"));
-                if ui.add_enabled(crate::update::enabled() && self.update_rx.is_none(), egui::Button::new("Verificar agora")).clicked() {
-                    check_now = true;
-                }
-            });
-            ui.checkbox(&mut self.settings.auto_update, "Atualizar automaticamente (ao abrir e a cada 6 h)");
-            if let Some(note) = &self.update_note {
-                ui.label(RichText::new(note).small().color(theme::p().text_secondary));
-            }
-            ui.separator();
-            ui.heading("Geral");
-            let s = &mut self.settings;
-            egui::Grid::new("prefs_general").num_columns(2).show(ui, |ui| {
-                ui.label("Commits exibidos no grafo");
-                ui.add(egui::DragValue::new(&mut s.max_commits).range(100..=200_000).speed(100));
-                ui.end_row();
-                ui.label("Autofetch (minutos, 0 = off)");
-                ui.add(egui::DragValue::new(&mut s.autofetch_minutes).range(0..=60));
-                ui.end_row();
-                ui.label("Branch padrão no init");
-                ui.text_edit_singleline(&mut s.default_branch);
-                ui.end_row();
-                ui.label("Formato de data");
-                ui.text_edit_singleline(&mut s.date_format);
-                ui.end_row();
-                ui.label("Pasta padrão de clone");
-                let mut dir = s.clone_dir.as_ref().map(|d| d.display().to_string()).unwrap_or_default();
-                if ui.text_edit_singleline(&mut dir).changed() {
-                    s.clone_dir = Some(PathBuf::from(dir));
-                }
-                ui.end_row();
-            });
-            ui.horizontal(|ui| {
-                ui.label("Tema");
-                let current = theme::themes().into_iter().find(|(id, _)| *id == s.theme).map(|(_, n)| n).unwrap_or("brio-git Dark");
-                egui::ComboBox::from_id_salt("theme_picker").selected_text(current).width(220.0).show_ui(ui, |ui| {
-                    for (id, name) in theme::themes() {
-                        ui.horizontal(|ui| {
-                            theme_swatch(ui, id);
-                            if ui.selectable_label(s.theme == id, name).clicked() {
-                                s.theme = id.to_string();
-                                theme::apply(ctx, id);
+                    ui.separator();
+                    ui.vertical(|ui| {
+                        ui.set_width(ui.available_width());
+                        ui.heading(p.section.label());
+                        ui.add_space(6.0);
+                        egui::ScrollArea::vertical().id_salt(("prefs", p.section.label())).auto_shrink([false, false]).show(ui, |ui| match p.section {
+                            PrefsSection::General => {
+                                let s = &mut self.settings;
+                                egui::Grid::new("prefs_general").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                                    ui.label("Autofetch (minutos, 0 = off)");
+                                    ui.add(egui::DragValue::new(&mut s.autofetch_minutes).range(0..=60));
+                                    ui.end_row();
+                                    ui.label("Branch padrão no init");
+                                    ui.text_edit_singleline(&mut s.default_branch);
+                                    ui.end_row();
+                                    ui.label("Formato de data");
+                                    ui.text_edit_singleline(&mut s.date_format);
+                                    ui.end_row();
+                                    ui.label("Pasta padrão de clone");
+                                    let mut dir = s.clone_dir.as_ref().map(|d| d.display().to_string()).unwrap_or_default();
+                                    if ui.text_edit_singleline(&mut dir).changed() {
+                                        s.clone_dir = Some(PathBuf::from(dir));
+                                    }
+                                    ui.end_row();
+                                    ui.label("Zoom");
+                                    let mut z = s.zoom;
+                                    if ui.add(egui::Slider::new(&mut z, 0.6..=2.0)).changed() {
+                                        s.zoom = z;
+                                        ctx.set_zoom_factor(z);
+                                    }
+                                    ui.end_row();
+                                });
+                                ui.add_space(6.0);
+                                ui.checkbox(&mut s.custom_titlebar, "Barra de título própria (sem decorações do sistema) — vale ao reiniciar");
+                                ui.add_space(6.0);
+                                if ui.button("Restaurar tamanhos dos painéis").on_hover_text("Volta as larguras do painel esquerdo, do detalhe e a altura do terminal ao padrão (vale ao reiniciar).").clicked() {
+                                    s.layout = crate::settings::Layout { window: s.layout.window, maximized: s.layout.maximized, ..Default::default() };
+                                }
+                            }
+                            PrefsSection::Graph => {
+                                let s = &mut self.settings;
+                                egui::Grid::new("prefs_graph").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                                    ui.label("Commits exibidos no grafo");
+                                    ui.add(egui::DragValue::new(&mut s.max_commits).range(100..=200_000).speed(100));
+                                    ui.end_row();
+                                });
+                                ui.add_space(6.0);
+                                if ui
+                                    .checkbox(&mut s.show_avatars, "Fotos dos autores no grafo")
+                                    .on_hover_text("Busca a foto pelo e-mail do commit: avatar do GitHub (e-mails noreply), GitLab conectado e Gravatar (envia o hash MD5 do e-mail).")
+                                    .changed()
+                                {
+                                    crate::avatars::set_enabled(s.show_avatars);
+                                }
+                                ui.checkbox(&mut s.show_stashes, "Mostrar stashes no grafo");
+                                ui.checkbox(&mut s.show_body_in_graph, "Mostrar descrição do commit no grafo");
+                            }
+                            PrefsSection::Themes => themes_page(ui, &mut self.settings),
+                            PrefsSection::GitProfile => {
+                                ui.label(RichText::new("Grava no ~/.gitconfig (vale para todos os clientes git).").small().color(theme::p().text_secondary));
+                                ui.add_space(4.0);
+                                egui::Grid::new("prefs_profile").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                                    ui.label("Nome");
+                                    ui.text_edit_singleline(&mut p.name);
+                                    ui.end_row();
+                                    ui.label("Email");
+                                    ui.text_edit_singleline(&mut p.email);
+                                    ui.end_row();
+                                });
+                                ui.add_space(10.0);
+                                ui.label(RichText::new("Assinatura de commits").strong());
+                                ui.checkbox(&mut p.sign, "Assinar commits por padrão (commit.gpgsign)");
+                                egui::Grid::new("prefs_sign").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                                    ui.label("Formato");
+                                    egui::ComboBox::from_id_salt("sign_format").selected_text(p.sign_format.as_str()).show_ui(ui, |ui| {
+                                        for f in ["openpgp", "ssh", "x509"] {
+                                            ui.selectable_value(&mut p.sign_format, f.to_string(), f);
+                                        }
+                                    });
+                                    ui.end_row();
+                                    ui.label("Chave");
+                                    ui.add(egui::TextEdit::singleline(&mut p.signing_key).hint_text(if p.sign_format == "ssh" { "~/.ssh/id_ed25519.pub" } else { "ID da chave GPG" }));
+                                    ui.end_row();
+                                });
+                                ui.add_space(8.0);
+                                if ui.button("Salvar perfil e assinatura").clicked() {
+                                    save_profile = true;
+                                }
+                            }
+                            PrefsSection::AppProfiles => {
+                                ui.label(RichText::new("Identidades usadas nos commits feitos pelo app, sem alterar o gitconfig.").small().color(theme::p().text_secondary));
+                                ui.add_space(4.0);
+                                let mut remove = None;
+                                for (i, prof) in self.settings.profiles.iter_mut().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        ui.add(egui::TextEdit::singleline(&mut prof.label).hint_text("Trabalho").desired_width(100.0));
+                                        ui.add(egui::TextEdit::singleline(&mut prof.name).hint_text("Nome").desired_width(140.0));
+                                        ui.add(egui::TextEdit::singleline(&mut prof.email).hint_text("email").desired_width(170.0));
+                                        if icons::button(ui, Icon::Close, 18.0, "Remover perfil").clicked() {
+                                            remove = Some(i);
+                                        }
+                                    });
+                                }
+                                if let Some(i) = remove {
+                                    self.settings.profiles.remove(i);
+                                    self.settings.active_profile = match self.settings.active_profile {
+                                        Some(a) if a == i => None,
+                                        Some(a) if a > i => Some(a - 1),
+                                        other => other,
+                                    };
+                                }
+                                if ui.button("+ Adicionar perfil").clicked() {
+                                    self.settings.profiles.push(crate::settings::Profile { label: format!("Perfil {}", self.settings.profiles.len() + 1), ..Default::default() });
+                                }
+                            }
+                            PrefsSection::Integrations => {
+                                ui.label(
+                                    RichText::new("github.com, gitlab.com e hosts com \"github\"/\"gitlab\" no nome são detectados sozinhos. Cadastre aqui outros hosts Enterprise/self-hosted.")
+                                        .small()
+                                        .color(theme::p().text_secondary),
+                                );
+                                ui.add_space(4.0);
+                                let mut remove_host = None;
+                                for (i, h) in self.settings.hosting_hosts.iter_mut().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        ui.add(egui::TextEdit::singleline(&mut h.host).hint_text("git.empresa.com").desired_width(150.0));
+                                        egui::ComboBox::from_id_salt(("host_kind", i)).selected_text(h.kind.label()).width(80.0).show_ui(ui, |ui| {
+                                            ui.selectable_value(&mut h.kind, crate::hosting::Kind::GitHub, "GitHub");
+                                            ui.selectable_value(&mut h.kind, crate::hosting::Kind::GitLab, "GitLab");
+                                        });
+                                        ui.add(egui::TextEdit::singleline(&mut h.api).hint_text("API (opcional)").desired_width(160.0));
+                                        if icons::button(ui, Icon::Close, 18.0, "Remover host").clicked() {
+                                            remove_host = Some(i);
+                                        }
+                                    });
+                                }
+                                if let Some(i) = remove_host {
+                                    self.settings.hosting_hosts.remove(i);
+                                }
+                                if ui.button("+ Adicionar host").clicked() {
+                                    self.settings.hosting_hosts.push(crate::hosting::HostConfig { host: String::new(), kind: crate::hosting::Kind::GitLab, api: String::new() });
+                                }
+                            }
+                            PrefsSection::Updates => {
+                                ui.horizontal(|ui| {
+                                    let installed = if crate::update::enabled() { format!("v{}", crate::update::VERSION) } else { "dev (build local, não se atualiza)".into() };
+                                    ui.label(format!("Versão instalada: {installed}"));
+                                    if ui.add_enabled(crate::update::enabled() && self.update_rx.is_none(), egui::Button::new("Verificar agora")).clicked() {
+                                        check_now = true;
+                                    }
+                                });
+                                ui.checkbox(&mut self.settings.auto_update, "Atualizar automaticamente (ao abrir e a cada 6 h)");
+                                if let Some(note) = &self.update_note {
+                                    ui.label(RichText::new(note).small().color(theme::p().text_secondary));
+                                }
                             }
                         });
-                    }
+                    });
                 });
             });
-            ui.checkbox(&mut s.custom_titlebar, "Barra de título própria (sem decorações do sistema) — vale ao reiniciar");
-            if ui
-                .checkbox(&mut s.show_avatars, "Fotos dos autores no grafo")
-                .on_hover_text("Busca a foto pelo e-mail do commit: avatar do GitHub (e-mails noreply), GitLab conectado e Gravatar (envia o hash MD5 do e-mail).")
-                .changed()
-            {
-                crate::avatars::set_enabled(s.show_avatars);
-            }
-            ui.checkbox(&mut s.show_stashes, "Mostrar stashes no grafo");
-            ui.checkbox(&mut s.show_body_in_graph, "Mostrar descrição do commit no grafo");
-            ui.horizontal(|ui| {
-                ui.label("Zoom");
-                let mut z = s.zoom;
-                if ui.add(egui::Slider::new(&mut z, 0.6..=2.0)).changed() {
-                    s.zoom = z;
-                    ctx.set_zoom_factor(z);
-                }
-            });
-        });
+        self.sync_theme(ctx);
+        let Some(p) = &mut self.prefs else { return };
         if save_profile {
             let dir = std::env::current_dir().unwrap_or_default();
             let res = ops::config_set(&dir, "user.name", p.name.trim(), true)
@@ -961,8 +1109,13 @@ impl BrioApp {
             Command::ToggleMaximize => toggle_maximize(ctx),
             Command::ToggleFullscreen => toggle_fullscreen(ctx),
             Command::SetTheme(id) => {
-                self.settings.theme = id.to_string();
-                theme::apply(ctx, id);
+                // Seguindo o sistema, a escolha vira o tema da variante correspondente.
+                match (self.settings.follow_system_theme, theme::is_light_theme(id)) {
+                    (true, true) => self.settings.theme_light = id.to_string(),
+                    (true, false) => self.settings.theme_dark = id.to_string(),
+                    (false, _) => self.settings.theme = id.to_string(),
+                }
+                self.sync_theme(ctx);
                 self.settings.save();
             }
         }
@@ -978,23 +1131,26 @@ impl BrioApp {
             crate::ui::toolbar::show(ui, tab, &recent, actions, app_req);
         });
 
-        // Larguras padrão proporcionais: em janelas estreitas o grafo não some.
+        // Larguras padrão proporcionais (em janelas estreitas o grafo não some);
+        // depois de arrastar, vale o tamanho salvo.
         let width = ui.available_width();
         if show_left {
-            Panel::left("left_panel")
+            let r = Panel::left("left_panel")
                 .resizable(true)
-                .default_size((width * 0.18).clamp(170.0, 260.0))
+                .default_size(settings.layout.left.unwrap_or((width * 0.18).clamp(170.0, 260.0)))
                 .size_range(150.0..=500.0)
                 .frame(egui::Frame::new().fill(theme::p().panel_bg0))
                 .show(ui, |ui| crate::ui::left_panel::show(ui, tab, actions));
+            remember_size(&mut settings.layout.left, r.response.rect.width());
         }
         if show_right && tab.rebase.is_none() {
-            Panel::right("detail_panel")
+            let r = Panel::right("detail_panel")
                 .resizable(true)
-                .default_size((width * 0.28).clamp(260.0, 420.0))
+                .default_size(settings.layout.right.unwrap_or((width * 0.28).clamp(260.0, 420.0)))
                 .size_range(240.0..=800.0)
                 .frame(egui::Frame::new().fill(theme::p().panel_bg0))
                 .show(ui, |ui| crate::ui::detail_panel::show(ui, tab, actions));
+            remember_size(&mut settings.layout.right, r.response.rect.width());
         }
 
         // Terminais só sob a área central, como no cliente de referência.
@@ -1003,9 +1159,9 @@ impl BrioApp {
             tab.new_terminal();
         }
         if tab.terminal_open && !tab.terminals.is_empty() {
-            Panel::bottom("terminal")
+            let r = Panel::bottom("terminal")
                 .resizable(true)
-                .default_size(260.0)
+                .default_size(settings.layout.terminal.unwrap_or(260.0))
                 .min_size(80.0)
                 .frame(egui::Frame::new().fill(theme::p().app_bg))
                 .show(ui, |ui| {
@@ -1013,6 +1169,7 @@ impl BrioApp {
                     let active = tab.active_terminal.min(tab.terminals.len() - 1);
                     tab.terminals[active].show(ui);
                 });
+            remember_size(&mut settings.layout.terminal, r.response.rect.height());
         }
 
         egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::p().app_bg)).show(ui, |ui| {
@@ -1049,6 +1206,8 @@ impl eframe::App for BrioApp {
             }
         }
 
+        self.sync_theme(&ctx);
+        self.remember_window(&ctx);
         let mut actions = Vec::new();
         let mut app_req = Vec::new();
         if self.settings.custom_titlebar {

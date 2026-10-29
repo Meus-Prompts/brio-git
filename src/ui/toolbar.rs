@@ -125,6 +125,15 @@ pub fn show(ui: &mut Ui, tab: &mut RepoTab, recent: &[std::path::PathBuf], actio
             item(ui, "Pull (fast-forward if possible)", Action::Pull(PullMode::FastForwardIfPossible));
             item(ui, "Pull (fast-forward only)", Action::Pull(PullMode::FastForwardOnly));
             item(ui, "Pull (rebase)", Action::Pull(PullMode::Rebase));
+            // Local divergente do remoto: oferece descartar o local, como no cliente de referência.
+            if let Some(s) = snap.as_ref()
+                && let Some(cur) = s.head.branch.as_deref().filter(|_| !s.head.detached)
+                && let Some((up, target)) = crate::ui::graph_view::upstream_of(s, cur)
+                && s.head.oid != Some(target)
+            {
+                ui.separator();
+                crate::ui::graph_view::reset_to_upstream_menu(ui, s, cur, &up, target, actions);
+            }
         });
         if tool_button(ui, Icon::Push, "Push", !detached, "Push").clicked() {
             actions.push(Action::Push { force: false });

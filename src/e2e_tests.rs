@@ -415,11 +415,12 @@ fn e2e_gitflow_init_feature_release() {
     let settings = c.harness.state().settings.clone();
     assert!(c.tab().snap.as_ref().unwrap().gitflow.is_none());
 
-    // Seção GITFLOW não inicializada mostra o botão; clicar abre o diálogo.
+    // Sem Gitflow a seção some; "Initialize Gitflow" fica no menu "+" do painel.
+    c.harness.get_by_label("Add").click();
+    c.harness.run_steps(3);
     c.harness.get_by_label("Initialize Gitflow").click();
     c.harness.run_steps(4);
     assert!(matches!(c.tab().dialog, Some(crate::repo_tab::Dialog::GitflowInit(ref g)) if g.master == "main"));
-    // O botão do painel continua na árvore; o do diálogo (desenhado depois) é o último.
     c.harness.get_all_by_role_and_label(egui::accesskit::Role::Button, "Initialize Gitflow").last().unwrap().click();
     c.harness.step();
     c.settle();
@@ -518,14 +519,14 @@ fn e2e_light_theme_renders() {
     let mut c = setup("light");
     let ctx = c.harness.ctx.clone();
     c.harness.state_mut().settings.theme = "light".into();
-    crate::theme::apply(&ctx, "light");
-    let wip = c.row_y(0);
     let x = c.message_x();
     c.click(pos2(x, c.row_y(2)));
+    assert!(crate::theme::is_light(), "tema das settings é aplicado no frame seguinte");
     c.shot("16_light_theme");
-    crate::theme::apply(&ctx, "dark");
+    c.harness.state_mut().settings.theme = "dark".into();
+    c.harness.step();
     assert!(!crate::theme::is_light());
-    let _ = wip;
+    let _ = ctx;
 }
 
 #[test]
@@ -725,8 +726,11 @@ fn e2e_github_connect_and_checkout_fork_pr() {
     c.settle();
     assert!(c.tab().hosting.as_ref().unwrap().connected.is_none(), "sem token: desconectado");
 
-    // Conectar pela UI: botão na seção -> diálogo -> digitar token -> Conectar.
+    // Conectar pela UI: menu "+" do painel -> diálogo -> digitar token -> Conectar
+    // (sem PRs/issues, as seções de hosting ficam ocultas).
     c.harness.run_steps(2);
+    c.harness.get_by_label("Add").click();
+    c.harness.run_steps(3);
     c.harness.get_by_label("Conectar ao GitHub (github.example.test)").click();
     c.harness.run_steps(4);
     c.shot("20_connect_github");
@@ -918,11 +922,13 @@ fn e2e_render_every_theme() {
     let x = c.message_x();
     c.click(pos2(x, c.row_y(2)));
     for (id, _) in crate::theme::themes() {
-        crate::theme::apply(&ctx, id);
+        c.harness.state_mut().settings.theme = id.into();
         c.harness.run_steps(2);
         c.shot(&format!("theme_{id}"));
     }
     crate::theme::apply(&ctx, "dark");
+    c.harness.state_mut().settings.theme = "dark".into();
+    c.harness.step();
 }
 
 #[test]
@@ -947,4 +953,82 @@ fn e2e_author_photo_replaces_initials() {
     c.harness.run_steps(2);
     c.shot("25_author_photos");
     crate::avatars::set_enabled(false);
+}
+
+#[test]
+fn e2e_reset_local_to_remote() {
+    use crate::git::ops::ResetMode;
+    use crate::repo_tab::Action;
+    let mut c = setup("reset_remote");
+    clean(&mut c);
+    let repo = c.repo.clone();
+    git(repo.parent().unwrap(), &["init", "-q", "--bare", "origin.git"]);
+    git(&repo, &["remote", "add", "origin", repo.parent().unwrap().join("origin.git").to_str().unwrap()]);
+    git(&repo, &["push", "-q", "-u", "origin", "main", "feat/login"]);
+    git(&repo, &["branch", "-q", "-u", "origin/feat/login", "feat/login"]);
+    let remote_main = git(&repo, &["rev-parse", "origin/main"]);
+    // Diverge: commit local no main e outro no feat/login.
+    git(&repo, &["commit", "-q", "--allow-empty", "-m", "local: só aqui"]);
+    git(&repo, &["checkout", "-q", "feat/login"]);
+    git(&repo, &["commit", "-q", "--allow-empty", "-m", "local: login"]);
+    git(&repo, &["checkout", "-q", "main"]);
+    let settings = c.harness.state().settings.clone();
+    c.tab().handle(Action::Refresh, &settings);
+    c.settle();
+
+    let snap = c.tab().snap.clone().unwrap();
+    let (up, target) = crate::ui::graph_view::upstream_of(&snap, "main").expect("main tem upstream");
+    assert_eq!((up.as_str(), target.to_string()), ("origin/main", remote_main.clone()));
+
+    // Branch que não é o atual: só move o ponteiro.
+    let (_, login_target) = crate::ui::graph_view::upstream_of(&snap, "feat/login").unwrap();
+    c.tab().handle(Action::ResetBranchTo { branch: "feat/login".into(), to: login_target }, &settings);
+    c.settle();
+    assert_eq!(git(&repo, &["rev-parse", "feat/login"]), git(&repo, &["rev-parse", "origin/feat/login"]));
+
+    // Branch atual: reset hard para o remoto.
+    c.tab().handle(Action::Reset { to: target, mode: ResetMode::Hard }, &settings);
+    c.settle();
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), remote_main);
+    assert!(crate::ui::graph_view::upstream_of(c.tab().snap.as_ref().unwrap(), "main").is_some_and(|(_, t)| t.to_string() == remote_main));
+}
+
+#[test]
+fn e2e_preferences_tabs_and_system_theme() {
+    let mut c = setup("prefs_tabs");
+    c.harness.state_mut().open_prefs();
+    c.harness.run_steps(3);
+    // Abas à esquerda: a página "Temas" troca o conteúdo da direita.
+    c.harness.get_by_label("Temas").click();
+    c.harness.run_steps(3);
+    assert!(c.harness.state().prefs.as_ref().is_some_and(|p| p.section == super::PrefsSection::Themes));
+    c.harness.get_by_label("Seguir o tema do sistema (claro e escuro)").click();
+    c.harness.run_steps(2);
+    assert!(c.harness.state().settings.follow_system_theme);
+    c.shot("18_prefs_themes");
+
+    c.harness.state_mut().settings.theme_light = "catppuccin-latte".into();
+    c.harness.input_mut().system_theme = Some(egui::Theme::Light);
+    c.harness.run_steps(3);
+    assert_eq!(crate::theme::p().id, "catppuccin-latte");
+    c.harness.input_mut().system_theme = Some(egui::Theme::Dark);
+    c.harness.run_steps(3);
+    assert_eq!(crate::theme::p().id, "dark");
+
+    // Janela centralizada.
+    let screen = c.harness.ctx.content_rect();
+    let win = c.harness.ctx.memory(|m| m.area_rect(egui::Id::new("prefs_window"))).expect("janela de preferências");
+    assert!((win.center().x - screen.center().x).abs() < 2.0 && (win.center().y - screen.center().y).abs() < 2.0, "{win:?} não está no centro de {screen:?}");
+}
+
+#[test]
+fn e2e_panel_sizes_are_remembered() {
+    let mut c = setup("layout");
+    let layout = c.harness.state().settings.layout.clone();
+    assert!(layout.left.is_some() && layout.right.is_some(), "tamanhos dos painéis registrados: {layout:?}");
+    // Um tamanho salvo vira o padrão do painel na próxima abertura.
+    c.harness.state_mut().settings.layout.left = Some(321.0);
+    c.harness.ctx.memory_mut(|m| *m = Default::default());
+    c.harness.run_steps(3);
+    assert_eq!(c.harness.state().settings.layout.left, Some(321.0));
 }

@@ -190,6 +190,11 @@ pub fn themes() -> Vec<(&'static str, &'static str)> {
     PALETTES.iter().map(|p| (p.id, p.name)).collect()
 }
 
+/// Se o tema `id` é claro (desconhecido = escuro).
+pub fn is_light_theme(id: &str) -> bool {
+    PALETTES.iter().find(|p| p.id == id).is_some_and(|p| p.light)
+}
+
 /// Paleta ativa.
 pub fn p() -> &'static Palette {
     &PALETTES[CURRENT.load(Ordering::Relaxed).min(PALETTES.len() - 1)]

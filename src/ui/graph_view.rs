@@ -748,11 +748,14 @@ pub fn ref_menu_local(ui: &mut Ui, snap: &Snapshot, name: &str, oid: Oid, hostin
         menu_item(ui, format!("Rebase {cur} onto {name}"), actions, Action::Rebase(name.into()));
         menu_item(ui, format!("Interactive Rebase {cur} onto {name}"), actions, Action::StartInteractiveRebase(oid));
     }
-    if let Some(up) = branch.and_then(|b| b.upstream.clone())
-        && branch.is_some_and(|b| b.behind > 0 && b.ahead == 0)
-        && let Some(target) = snap.remotes.iter().flat_map(|r| r.branches.iter().map(move |b| (format!("{}/{}", r.name, b.name), b.oid))).find(|(n, _)| *n == up)
-    {
-        menu_item(ui, format!("Fast-forward {name} to {up}"), actions, Action::FastForward { branch: name.into(), to: target.1 });
+    if let Some((up, target)) = upstream_of(snap, name) {
+        let b = branch.expect("upstream_of só acha branches locais");
+        if b.behind > 0 && b.ahead == 0 {
+            menu_item(ui, format!("Fast-forward {name} to {up}"), actions, Action::FastForward { branch: name.into(), to: target });
+        }
+        if b.oid != target {
+            reset_to_upstream_menu(ui, snap, name, &up, target, actions);
+        }
     }
     if is_cur {
         menu_item(ui, "Push", actions, Action::Push { force: false });
@@ -778,6 +781,31 @@ pub fn ref_menu_local(ui: &mut Ui, snap: &Snapshot, name: &str, oid: Oid, hostin
     ui.separator();
     menu_item(ui, "Hide in the graph", actions, Action::ToggleHidden(name.into()));
     menu_item(ui, "Solo", actions, Action::Solo(name.into()));
+}
+
+/// Upstream de um branch local e o commit para onde ele aponta.
+pub fn upstream_of(snap: &Snapshot, name: &str) -> Option<(String, Oid)> {
+    let up = snap.locals.iter().find(|b| b.name == name)?.upstream.clone()?;
+    let oid = snap.remotes.iter().flat_map(|r| r.branches.iter().map(move |b| (format!("{}/{}", r.name, b.name), b.oid))).find(|(n, _)| *n == up)?.1;
+    Some((up, oid))
+}
+
+/// "Reset <branch> to <remoto>": no branch atual escolhe o modo (soft/mixed/hard);
+/// nos outros só move o ponteiro (`git branch -f`), sem tocar na working copy.
+pub fn reset_to_upstream_menu(ui: &mut Ui, snap: &Snapshot, name: &str, up: &str, target: Oid, actions: &mut Vec<Action>) {
+    let is_cur = snap.head.branch.as_deref() == Some(name) && !snap.head.detached;
+    let short = &target.to_string()[..7];
+    if !is_cur {
+        let body = format!("Mover {name} para {up} ({short})? Os commits locais que não estão em {up} deixam de ser referenciados por {name}.");
+        menu_item(ui, format!("Reset {name} to {up}"), actions, confirm("Reset to remote", body, "Reset", true, Action::ResetBranchTo { branch: name.into(), to: target }));
+        return;
+    }
+    ui.menu_button(format!("Reset {name} to {up}"), |ui| {
+        menu_item(ui, "Soft - keep all changes", actions, Action::Reset { to: target, mode: ResetMode::Soft });
+        menu_item(ui, "Mixed - keep working copy but reset index", actions, Action::Reset { to: target, mode: ResetMode::Mixed });
+        let body = format!("Resetar {name} para {up} ({short}) descartando commits locais e todas as mudanças não commitadas?");
+        menu_item(ui, "Hard - discard all changes", actions, confirm("Reset hard to remote", body, "Reset", true, Action::Reset { to: target, mode: ResetMode::Hard }));
+    });
 }
 
 pub fn ref_menu_remote(ui: &mut Ui, snap: &Snapshot, full: &str, oid: Oid, actions: &mut Vec<Action>) {

@@ -1,4 +1,6 @@
 //! Painel esquerdo: LOCAL, REMOTE, TAGS, STASHES, SUBMODULES, WORKTREES.
+//! Fora LOCAL e REMOTE, uma seção só aparece quando tem itens; as ações de
+//! criação ficam no botão "+" do topo.
 
 use std::collections::BTreeMap;
 
@@ -25,6 +27,15 @@ pub fn show(ui: &mut Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) {
                 actions.push(Action::ClearSolo);
             }
         }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_space(8.0);
+            let plus = icons::button(ui, Icon::Plus, 20.0, "Adicionar branch, tag, remote, submodule…");
+            plus.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Add"));
+            egui::Popup::menu(&plus).show(|ui| {
+                ui.set_min_width(200.0);
+                add_menu(ui, tab, &snap, actions);
+            });
+        });
     });
     ui.horizontal(|ui| {
         ui.add_space(8.0);
@@ -55,6 +66,7 @@ pub fn show(ui: &mut Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) {
 
         // REMOTE
         let remote_count: usize = snap.remotes.iter().map(|r| r.branches.iter().filter(|b| matches(&format!("{}/{}", r.name, b.name))).count()).sum();
+        let hosting_menu = crate::ui::hosting_view::remote_menu(tab);
         if section(ui, tab, "REMOTE", Icon::Cloud, remote_count, actions, Some(|ui: &mut Ui, actions: &mut Vec<Action>| {
             if ui.button("Add remote").clicked() {
                 actions.push(Action::OpenDialog(Dialog::AddRemote { name: String::new(), url: String::new() }));
@@ -63,6 +75,10 @@ pub fn show(ui: &mut Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) {
             if ui.button("Fetch all").clicked() {
                 actions.push(Action::Fetch);
                 ui.close();
+            }
+            if !hosting_menu.is_empty() {
+                ui.separator();
+                crate::ui::hosting_view::menu_items(ui, &hosting_menu, actions);
             }
         })) {
             for remote in &snap.remotes {
@@ -110,7 +126,7 @@ pub fn show(ui: &mut Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) {
 
         // TAGS
         let tags: Vec<_> = snap.tags.iter().filter(|t| matches(&t.name)).collect();
-        if section(ui, tab, "TAGS", Icon::Tag, tags.len(), actions, None::<fn(&mut Ui, &mut Vec<Action>)>) {
+        if !tags.is_empty() && section(ui, tab, "TAGS", Icon::Tag, tags.len(), actions, None::<fn(&mut Ui, &mut Vec<Action>)>) {
             for t in tags {
                 let hidden = tab.hidden.contains(&t.name);
                 let resp = tree_row(ui, 1, &t.name, Some(Icon::Tag), false, Some(hidden));
@@ -125,8 +141,9 @@ pub fn show(ui: &mut Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) {
         }
 
         // STASHES
-        if section(ui, tab, "STASHES", Icon::Stash, snap.stashes.len(), actions, None::<fn(&mut Ui, &mut Vec<Action>)>) {
-            for s in snap.stashes.iter().filter(|s| matches(&s.message)) {
+        let stashes: Vec<_> = snap.stashes.iter().filter(|s| matches(&s.message)).collect();
+        if !stashes.is_empty() && section(ui, tab, "STASHES", Icon::Stash, stashes.len(), actions, None::<fn(&mut Ui, &mut Vec<Action>)>) {
+            for s in stashes {
                 let resp = tree_row(ui, 1, &s.message, Some(Icon::Stash), false, None);
                 if resp.clicked() {
                     actions.push(Action::JumpTo(s.oid));
@@ -158,7 +175,8 @@ pub fn show(ui: &mut Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) {
         }
 
         // SUBMODULES
-        if section(ui, tab, "SUBMODULES", Icon::Folder, snap.submodules.len(), actions, Some(|ui: &mut Ui, actions: &mut Vec<Action>| {
+        if !snap.submodules.is_empty()
+            && section(ui, tab, "SUBMODULES", Icon::Folder, snap.submodules.len(), actions, Some(|ui: &mut Ui, actions: &mut Vec<Action>| {
             if ui.button("Add a new submodule").clicked() {
                 actions.push(Action::OpenDialog(Dialog::SubmoduleAdd { url: String::new(), path: String::new() }));
                 ui.close();
@@ -196,7 +214,8 @@ pub fn show(ui: &mut Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) {
         }
 
         // WORKTREES
-        if section(ui, tab, "WORKTREES", Icon::Folder, snap.worktrees.len(), actions, Some(|ui: &mut Ui, actions: &mut Vec<Action>| {
+        if !snap.worktrees.is_empty()
+            && section(ui, tab, "WORKTREES", Icon::Folder, snap.worktrees.len(), actions, Some(|ui: &mut Ui, actions: &mut Vec<Action>| {
             if ui.button("Add a new worktree").clicked() {
                 actions.push(Action::OpenDialog(Dialog::WorktreeAdd { path: String::new(), branch: String::new(), new_branch: true }));
                 ui.close();
@@ -238,6 +257,7 @@ pub fn show(ui: &mut Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) {
 
         // GIT LFS
         if let Some(patterns) = &snap.lfs
+            && !patterns.is_empty()
             && section(ui, tab, "GIT LFS", Icon::File, patterns.len(), actions, Some(|ui: &mut Ui, actions: &mut Vec<Action>| {
                 if ui.button("Track pattern…").clicked() {
                     actions.push(Action::OpenDialog(Dialog::LfsTrack { pattern: String::new() }));
@@ -252,10 +272,6 @@ pub fn show(ui: &mut Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) {
                     ui.close();
                 }
             })) {
-                if patterns.is_empty() {
-                    let r = tree_row(ui, 1, "Nenhum padrão rastreado — clique com o botão direito em GIT LFS", None, false, None);
-                    let _ = r;
-                }
                 for pat in patterns {
                     let resp = tree_row(ui, 1, pat, Some(Icon::File), false, None);
                     resp.context_menu(|ui| {
@@ -270,24 +286,9 @@ pub fn show(ui: &mut Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) {
 }
 
 fn gitflow_section(ui: &mut Ui, tab: &mut RepoTab, snap: &Snapshot, actions: &mut Vec<Action>) {
-    use crate::git::gitflow::{FlowKind, GitflowConfig};
-    let Some(cfg) = &snap.gitflow else {
-        if section(ui, tab, "GITFLOW", Icon::Branch, 0, actions, None::<fn(&mut Ui, &mut Vec<Action>)>) {
-            ui.horizontal(|ui| {
-                ui.add_space(24.0);
-                if ui.button("Initialize Gitflow").clicked() {
-                    // Sugere o branch principal que existe no repo.
-                    let master = ["main", "master"]
-                        .iter()
-                        .find(|m| snap.locals.iter().any(|b| b.name == **m))
-                        .map(|m| m.to_string())
-                        .unwrap_or_else(|| snap.head.branch.clone().unwrap_or_else(|| "main".into()));
-                    actions.push(Action::OpenDialog(Dialog::GitflowInit(GitflowConfig { master, ..Default::default() })));
-                }
-            });
-        }
-        return;
-    };
+    use crate::git::gitflow::FlowKind;
+    // Sem Gitflow inicializado a seção some; "Initialize Gitflow" fica no "+".
+    let Some(cfg) = &snap.gitflow else { return };
     let flows: Vec<(FlowKind, Vec<&str>)> = FlowKind::ALL
         .iter()
         .map(|k| {
@@ -338,6 +339,40 @@ fn gitflow_section(ui: &mut Ui, tab: &mut RepoTab, snap: &Snapshot, actions: &mu
                 }
             });
         }
+    }
+}
+
+/// Menu do "+": cria o que as seções ocultas (sem itens) ofereceriam.
+fn add_menu(ui: &mut Ui, tab: &RepoTab, snap: &Snapshot, actions: &mut Vec<Action>) {
+    let mut item = |ui: &mut Ui, label: &str, a: Action| {
+        if ui.button(label).clicked() {
+            actions.push(a);
+            ui.close();
+        }
+    };
+    if let Some(h) = snap.head.oid {
+        item(ui, "Create branch", Action::OpenDialog(Dialog::CreateBranch { at: h, name: String::new(), checkout: true }));
+        item(ui, "Create tag", Action::OpenDialog(Dialog::CreateTag { at: h, name: String::new(), message: String::new(), annotated: false }));
+    }
+    item(ui, "Add remote", Action::OpenDialog(Dialog::AddRemote { name: String::new(), url: String::new() }));
+    item(ui, "Add a new submodule", Action::OpenDialog(Dialog::SubmoduleAdd { url: String::new(), path: String::new() }));
+    item(ui, "Add a new worktree", Action::OpenDialog(Dialog::WorktreeAdd { path: String::new(), branch: String::new(), new_branch: true }));
+    if snap.gitflow.is_none() {
+        // Sugere o branch principal que existe no repo.
+        let master = ["main", "master"]
+            .iter()
+            .find(|m| snap.locals.iter().any(|b| b.name == **m))
+            .map(|m| m.to_string())
+            .unwrap_or_else(|| snap.head.branch.clone().unwrap_or_else(|| "main".into()));
+        item(ui, "Initialize Gitflow", Action::OpenDialog(Dialog::GitflowInit(crate::git::gitflow::GitflowConfig { master, ..Default::default() })));
+    }
+    if snap.lfs.is_some() {
+        item(ui, "Track with Git LFS…", Action::OpenDialog(Dialog::LfsTrack { pattern: String::new() }));
+    }
+    let hosting = crate::ui::hosting_view::remote_menu(tab);
+    if !hosting.is_empty() {
+        ui.separator();
+        crate::ui::hosting_view::menu_items(ui, &hosting, actions);
     }
 }
 
