@@ -261,6 +261,9 @@ impl Terminal {
             match ev {
                 egui::Event::Text(t) => self.write(t.into_bytes()),
                 egui::Event::Paste(t) => self.write(t.replace("\r\n", "\r").replace('\n', "\r").into_bytes()),
+                // Clipboard só com imagem: o egui-winit consome o Ctrl+V e não gera Key.
+                // Repassa o ^V cru para o app (ex.: Claude Code) ler a imagem do clipboard.
+                egui::Event::PasteImage(_) => self.write([0x16]),
                 egui::Event::Copy => self.write([0x03]),
                 egui::Event::Cut => self.write([0x18]),
                 egui::Event::Key { key, pressed: true, modifiers, .. } => {
